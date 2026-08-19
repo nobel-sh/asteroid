@@ -1,6 +1,7 @@
 mod db;
 mod error;
 mod memtable;
+mod wal;
 mod write;
 
 pub use db::Db;
