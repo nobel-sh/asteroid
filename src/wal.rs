@@ -18,7 +18,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
+    io::{Read, Write},
     path::Path,
 };
 
@@ -132,8 +132,8 @@ fn decode_payload(bytes: &[u8]) -> Result<WalRecord> {
     })
 }
 
-pub(crate) fn decode_record(bytes: &[u8]) -> Result<WalRecord> {
-    let mut decoder = Decoder::new(bytes);
+fn decode_record(decoder: &mut Decoder) -> Result<WalRecord> {
+    let record_start = decoder.position();
 
     if decoder.take(MAGIC_BYTES.len())? != MAGIC_BYTES {
         return Err(Error::CorruptWal("invalid magic bytes".to_owned()));
@@ -147,18 +147,17 @@ pub(crate) fn decode_record(bytes: &[u8]) -> Result<WalRecord> {
     }
 
     let payload_length = decoder.read_u32()? as usize;
-    let payload_bytes = decoder.take(payload_length)?;
-    let checksummed_length = decoder.position();
+    let payload = decoder.take(payload_length)?;
+
+    let checksum_end = decoder.position();
     let stored_checksum = decoder.read_u32()?;
 
-    decoder.finish()?;
-
-    let actual_checksum = crc32fast::hash(&bytes[..checksummed_length]);
+    let actual_checksum = crc32fast::hash(&decoder.bytes[record_start..checksum_end]);
     if stored_checksum != actual_checksum {
         return Err(Error::CorruptWal("checksum mismatch".to_owned()));
     }
 
-    decode_payload(payload_bytes)
+    decode_payload(payload)
 }
 
 fn validate_sequence_range(first_sequence: u64, operation_count: u32) -> Result<()> {
@@ -220,6 +219,10 @@ impl<'a> Decoder<'a> {
     fn position(&self) -> usize {
         self.cursor
     }
+
+    fn is_empty(&self) -> bool {
+        self.cursor == self.bytes.len()
+    }
 }
 
 #[derive(Debug)]
@@ -243,6 +246,17 @@ impl Wal {
         self.file.sync_all()?;
         Ok(())
     }
+
+    pub(crate) fn read_records(&mut self) -> Result<Vec<WalRecord>> {
+        let mut buffer = Vec::new();
+        self.file.read_to_end(&mut buffer)?;
+        let mut decoder = Decoder::new(&buffer);
+        let mut records = Vec::new();
+        while !decoder.is_empty() {
+            records.push(decode_record(&mut decoder)?);
+        }
+        Ok(records)
+    }
 }
 
 #[cfg(test)]
@@ -252,7 +266,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{decode_record, Wal, WalRecord};
+    use super::{decode_record, Decoder, Wal, WalRecord};
     use crate::WriteBatch;
 
     #[test]
@@ -275,8 +289,9 @@ mod tests {
         wal.append(expected.first_sequence, &expected.batch)
             .unwrap();
         drop(wal);
-
-        let decoded = decode_record(&fs::read(&path).unwrap()).unwrap();
+        let bytes = fs::read(&path).unwrap();
+        let mut decoder = Decoder::new(&bytes);
+        let decoded = decode_record(&mut decoder).unwrap();
         fs::remove_file(path).unwrap();
 
         assert_eq!(decoded, expected);

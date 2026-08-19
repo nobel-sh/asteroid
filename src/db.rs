@@ -14,11 +14,29 @@ pub struct Db {
 
 impl Db {
     pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        Ok(Self {
-            wal: Wal::open(path)?,
+        let mut wal = Wal::open(path)?;
+        let records = wal.read_records()?;
+        let mut db = Self {
+            wal,
             memtable: Memtable::default(),
             last_sequence: 0,
-        })
+        };
+
+        for record in records {
+            if record.batch.is_empty() {
+                continue;
+            }
+            let operation_count =
+                u64::try_from(record.batch.len()).map_err(|_| Error::SequenceExhausted)?;
+            let last_sequence = record
+                .first_sequence
+                .checked_add(operation_count - 1)
+                .ok_or(Error::SequenceExhausted)?;
+            db.memtable
+                .apply_batch(&record.batch, record.first_sequence);
+            db.last_sequence = last_sequence;
+        }
+        Ok(db)
     }
 
     pub fn get(&self, key: &Key) -> Option<&[u8]> {
@@ -99,6 +117,30 @@ mod tests {
         db.write(batch).unwrap();
 
         assert_eq!(db.get(&Key::from("key")), Some(b"last".as_slice()));
+        assert_eq!(db.last_sequence(), 3);
+
+        drop(db);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn recovers_from_wal() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("db-{}-{unique}.wal", std::process::id()));
+
+        let mut db = Db::open(&path).unwrap();
+        db.put("kept", "value").unwrap();
+        db.put("deleted", "value").unwrap();
+        db.delete("deleted").unwrap();
+        drop(db);
+
+        let db = Db::open(&path).unwrap();
+
+        assert_eq!(db.get(&Key::from("kept")), Some(b"value".as_slice()));
+        assert_eq!(db.get(&Key::from("deleted")), None);
         assert_eq!(db.last_sequence(), 3);
 
         drop(db);

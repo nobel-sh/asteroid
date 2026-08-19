@@ -1,3 +1,4 @@
+use crate::{WriteBatch, WriteOp};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -106,6 +107,18 @@ impl Memtable {
             .is_none_or(|current| entry.sequence > current.sequence)
         {
             self.entries.insert(key, entry);
+        }
+    }
+
+    pub(crate) fn apply_batch(&mut self, batch: &WriteBatch, starting_sequence: u64) {
+        let mut offset = 0;
+        for operation in &batch.operations {
+            let sequence = offset + starting_sequence;
+            match operation {
+                WriteOp::Delete { key } => self.delete(sequence, key.clone()),
+                WriteOp::Put { key, value } => self.put(sequence, key.clone(), value.clone()),
+            }
+            offset += 1;
         }
     }
 }
