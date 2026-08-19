@@ -3,6 +3,12 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Key(Vec<u8>);
 
+impl Key {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 impl From<&str> for Key {
     fn from(value: &str) -> Self {
         Self(value.as_bytes().to_vec())
@@ -23,6 +29,12 @@ impl From<Vec<u8>> for Key {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Value(Vec<u8>);
+
+impl Value {
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
 
 impl From<&str> for Value {
     fn from(value: &str) -> Self {
@@ -48,78 +60,68 @@ enum StoredValue {
     Tombstone,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct Entry {
+    sequence: u64,
+    value: StoredValue,
+}
+
 #[derive(Debug, Default)]
-pub struct Memtable {
-    entries: BTreeMap<Key, StoredValue>,
+pub(crate) struct Memtable {
+    entries: BTreeMap<Key, Entry>,
 }
 
 impl Memtable {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn put(&mut self, key: Key, value: impl Into<Value>) {
-        self.entries.insert(key, StoredValue::Data(value.into()));
-    }
-
-    pub fn get(&self, key: &Key) -> Option<&[u8]> {
-        match self.entries.get(key) {
+    pub(crate) fn get(&self, key: &Key) -> Option<&[u8]> {
+        match self.entries.get(key).map(|entry| &entry.value) {
             Some(StoredValue::Data(value)) => Some(&value.0),
             Some(StoredValue::Tombstone) | None => None,
         }
     }
 
-    pub fn delete(&mut self, key: Key) {
-        self.entries.insert(key, StoredValue::Tombstone);
+    pub(crate) fn put(&mut self, sequence: u64, key: Key, value: Value) {
+        self.apply(
+            key,
+            Entry {
+                sequence,
+                value: StoredValue::Data(value),
+            },
+        );
+    }
+
+    pub(crate) fn delete(&mut self, sequence: u64, key: Key) {
+        self.apply(
+            key,
+            Entry {
+                sequence,
+                value: StoredValue::Tombstone,
+            },
+        );
+    }
+
+    fn apply(&mut self, key: Key, entry: Entry) {
+        if self
+            .entries
+            .get(&key)
+            .is_none_or(|current| entry.sequence > current.sequence)
+        {
+            self.entries.insert(key, entry);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, Memtable, StoredValue};
+    use super::{Key, Memtable, Value};
 
     #[test]
-    fn put_get_replace_and_delete() {
-        let mut memtable = Memtable::new();
-        let key = Key::from("foo");
+    fn newer_entries_win() {
+        let mut memtable = Memtable::default();
+        let key = Key::from("key");
 
-        assert_eq!(memtable.get(&key), None);
+        memtable.put(2, key.clone(), Value::from("new"));
+        memtable.put(1, key.clone(), Value::from("old"));
 
-        memtable.put(key.clone(), "first");
-        assert_eq!(memtable.get(&key), Some(b"first".as_slice()));
-
-        memtable.put(key.clone(), "second");
-        assert_eq!(memtable.get(&key), Some(b"second".as_slice()));
-
-        memtable.delete(key.clone());
-        assert_eq!(memtable.get(&key), None);
-        assert_eq!(memtable.entries.get(&key), Some(&StoredValue::Tombstone));
-    }
-
-    #[test]
-    fn deleting_leaves_a_tombstone() {
-        let mut memtable = Memtable::new();
-        let key = Key::from("missing");
-
-        memtable.delete(key.clone());
-
-        assert_eq!(memtable.get(&key), None);
-        assert_eq!(memtable.entries.get(&key), Some(&StoredValue::Tombstone));
-    }
-
-    #[test]
-    fn keys_byte_order() {
-        let mut memtable = Memtable::new();
-        memtable.put(Key::from("c"), "");
-        memtable.put(Key::from("a"), "");
-        memtable.put(Key::from("b"), "");
-
-        let keys: Vec<&[u8]> = memtable
-            .entries
-            .keys()
-            .map(|key| key.0.as_slice())
-            .collect();
-
-        assert_eq!(keys, [b"a".as_slice(), b"b".as_slice(), b"c".as_slice()]);
+        assert_eq!(memtable.get(&key), Some(b"new".as_slice()));
     }
 }

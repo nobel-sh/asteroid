@@ -1,9 +1,9 @@
-use ligma::{Key, Memtable};
+use ligma::{Db, Key};
 
 fn main() {
-    let mut memtable = Memtable::new();
+    let mut db = Db::new();
     let key = Key::from("foo");
 
-    memtable.put(key.clone(), "bar");
-    println!("{:?}", memtable.get(&key));
+    db.put(key.clone(), "bar").expect("put failed");
+    println!("{:?}", db.get(&key));
 }
