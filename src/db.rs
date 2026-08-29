@@ -1,25 +1,33 @@
+use std::path::Path;
+
 use super::{
     error::{Error, Result},
-    memtable::{Key, Memtable, Value},
+    memtable::{Key, Lookup, Memtable, Value},
+    table::SSTable,
     wal::Wal,
     write::{WriteBatch, WriteOp},
 };
+
+const MEMTABLE_LIMIT: usize = 4;
 
 #[derive(Debug)]
 pub struct Db {
     wal: Wal,
     memtable: Memtable,
     last_sequence: u64,
+    sstable: SSTable,
 }
 
 impl Db {
-    pub fn open(path: impl AsRef<std::path::Path>) -> Result<Self> {
-        let mut wal = Wal::open(path)?;
+    pub fn open(wal_path: impl AsRef<Path>, sst_path: impl AsRef<Path>) -> Result<Self> {
+        let mut wal = Wal::open(wal_path)?;
         let records = wal.read_records()?;
+        let sstable = SSTable::new(sst_path)?;
         let mut db = Self {
             wal,
             memtable: Memtable::default(),
             last_sequence: 0,
+            sstable,
         };
 
         for record in records {
@@ -40,13 +48,24 @@ impl Db {
     }
 
     pub fn get(&self, key: &Key) -> Option<&[u8]> {
-        self.memtable.get(key)
+        match self.memtable.lookup(key) {
+            Lookup::Value(value) => Some(value),
+            Lookup::Deleted => None,
+            Lookup::NotFound => match self.sstable.lookup(key) {
+                Lookup::Value(value) => Some(value),
+                Lookup::Deleted | Lookup::NotFound => None,
+            },
+        }
     }
 
     pub fn put(&mut self, key: impl Into<Key>, value: impl Into<Value>) -> Result<()> {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
         self.write(batch)
+    }
+
+    fn memtable_limit_exceeded(&self) -> bool {
+        self.memtable.entry_count() >= MEMTABLE_LIMIT
     }
 
     pub fn delete(&mut self, key: impl Into<Key>) -> Result<()> {
@@ -58,6 +77,11 @@ impl Db {
     pub fn write(&mut self, batch: WriteBatch) -> Result<()> {
         if batch.is_empty() {
             return Ok(());
+        }
+
+        if self.memtable_limit_exceeded() {
+            self.sstable.write_memtable(&self.memtable)?;
+            self.memtable = Memtable::default();
         }
 
         let operation_count =
@@ -95,20 +119,26 @@ impl Db {
 mod tests {
     use std::{
         fs,
+        path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::Db;
     use crate::{Key, WriteBatch};
 
-    #[test]
-    fn batch_operations_are_applied_in_order() {
+    fn paths() -> (PathBuf, PathBuf) {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("db-{}-{unique}.wal", std::process::id()));
-        let mut db = Db::open(&path).unwrap();
+        let base = std::env::temp_dir().join(format!("db-{}-{unique}", std::process::id()));
+        (base.with_extension("wal"), base.with_extension("sst"))
+    }
+
+    #[test]
+    fn batch_operations_are_applied_in_order() {
+        let (wal_path, sst_path) = paths();
+        let mut db = Db::open(&wal_path, &sst_path).unwrap();
         let mut batch = WriteBatch::new();
         batch.put("key", "first");
         batch.delete("key");
@@ -120,30 +150,28 @@ mod tests {
         assert_eq!(db.last_sequence(), 3);
 
         drop(db);
-        fs::remove_file(path).unwrap();
+        fs::remove_file(wal_path).unwrap();
+        fs::remove_file(sst_path).unwrap();
     }
 
     #[test]
     fn recovers_from_wal() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("db-{}-{unique}.wal", std::process::id()));
+        let (wal_path, sst_path) = paths();
 
-        let mut db = Db::open(&path).unwrap();
+        let mut db = Db::open(&wal_path, &sst_path).unwrap();
         db.put("kept", "value").unwrap();
         db.put("deleted", "value").unwrap();
         db.delete("deleted").unwrap();
         drop(db);
 
-        let db = Db::open(&path).unwrap();
+        let db = Db::open(&wal_path, &sst_path).unwrap();
 
         assert_eq!(db.get(&Key::from("kept")), Some(b"value".as_slice()));
         assert_eq!(db.get(&Key::from("deleted")), None);
         assert_eq!(db.last_sequence(), 3);
 
         drop(db);
-        fs::remove_file(path).unwrap();
+        fs::remove_file(wal_path).unwrap();
+        fs::remove_file(sst_path).unwrap();
     }
 }

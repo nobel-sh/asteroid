@@ -1,6 +1,7 @@
 mod db;
 mod error;
 mod memtable;
+mod table;
 mod wal;
 mod write;
 

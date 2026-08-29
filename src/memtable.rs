@@ -56,15 +56,31 @@ impl From<Vec<u8>> for Value {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum StoredValue {
+pub(crate) enum StoredValue {
     Data(Value),
     Tombstone,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct Entry {
-    sequence: u64,
-    value: StoredValue,
+pub(crate) struct Entry {
+    pub(crate) sequence: u64,
+    pub(crate) value: StoredValue,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) enum Lookup<'a> {
+    Value(&'a [u8]),
+    Deleted,
+    NotFound,
+}
+
+impl Entry {
+    pub(crate) fn lookup(&self) -> Lookup<'_> {
+        match &self.value {
+            StoredValue::Data(value) => Lookup::Value(value.as_bytes()),
+            StoredValue::Tombstone => Lookup::Deleted,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -73,11 +89,10 @@ pub(crate) struct Memtable {
 }
 
 impl Memtable {
-    pub(crate) fn get(&self, key: &Key) -> Option<&[u8]> {
-        match self.entries.get(key).map(|entry| &entry.value) {
-            Some(StoredValue::Data(value)) => Some(&value.0),
-            Some(StoredValue::Tombstone) | None => None,
-        }
+    pub(crate) fn lookup(&self, key: &Key) -> Lookup<'_> {
+        self.entries
+            .get(key)
+            .map_or(Lookup::NotFound, Entry::lookup)
     }
 
     pub(crate) fn put(&mut self, sequence: u64, key: Key, value: Value) {
@@ -111,21 +126,27 @@ impl Memtable {
     }
 
     pub(crate) fn apply_batch(&mut self, batch: &WriteBatch, starting_sequence: u64) {
-        let mut offset = 0;
-        for operation in &batch.operations {
+        for (offset, operation) in (0_u64..).zip(&batch.operations) {
             let sequence = offset + starting_sequence;
             match operation {
                 WriteOp::Delete { key } => self.delete(sequence, key.clone()),
                 WriteOp::Put { key, value } => self.put(sequence, key.clone(), value.clone()),
             }
-            offset += 1;
         }
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&Key, &Entry)> {
+        self.entries.iter()
+    }
+
+    pub(crate) fn entry_count(&self) -> usize {
+        self.entries.len()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Key, Memtable, Value};
+    use super::{Key, Lookup, Memtable, Value};
 
     #[test]
     fn newer_entries_win() {
@@ -135,6 +156,6 @@ mod tests {
         memtable.put(2, key.clone(), Value::from("new"));
         memtable.put(1, key.clone(), Value::from("old"));
 
-        assert_eq!(memtable.get(&key), Some(b"new".as_slice()));
+        assert_eq!(memtable.lookup(&key), Lookup::Value(b"new"));
     }
 }
