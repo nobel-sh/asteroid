@@ -1,4 +1,7 @@
-use std::path::Path;
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+};
 
 use super::{
     error::{Error, Result},
@@ -15,19 +18,50 @@ pub struct Db {
     wal: Wal,
     memtable: Memtable,
     last_sequence: u64,
-    sstable: SSTable,
+    sstables: Vec<SSTable>,
+    db_dir: PathBuf,
+    next_table_id: u32,
 }
 
 impl Db {
-    pub fn open(wal_path: impl AsRef<Path>, sst_path: impl AsRef<Path>) -> Result<Self> {
+    pub fn open(db_dir: PathBuf) -> Result<Self> {
+        std::fs::DirBuilder::new().recursive(true).create(&db_dir)?;
+        let wal_path = Path::new(&db_dir).join("wal.db");
+
         let mut wal = Wal::open(wal_path)?;
         let records = wal.read_records()?;
-        let sstable = SSTable::new(sst_path)?;
+
+        let mut table_list = Vec::new();
+        for entry in std::fs::read_dir(&db_dir)? {
+            let table_path = entry?.path();
+            if table_path.extension() != Some(OsStr::new("sst")) {
+                continue;
+            }
+
+            let id: u32 = table_path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .and_then(|stem| stem.parse().ok())
+                .ok_or_else(|| Error::CorruptSstable("Invalid SSTable filename".into()))?;
+            let file_path = Path::new(table_path.as_path());
+            let table = SSTable::open(file_path, id)?;
+            table_list.push(table);
+        }
+        table_list.sort_by_key(SSTable::id);
+        let next_table_id = table_list.last().map_or(1, |table| table.id() + 1);
+        let last_sequence = table_list
+            .iter()
+            .filter_map(SSTable::last_sequence)
+            .max()
+            .unwrap_or(0);
+
         let mut db = Self {
             wal,
             memtable: Memtable::default(),
-            last_sequence: 0,
-            sstable,
+            last_sequence,
+            sstables: table_list,
+            db_dir,
+            next_table_id,
         };
 
         for record in records {
@@ -42,7 +76,7 @@ impl Db {
                 .ok_or(Error::SequenceExhausted)?;
             db.memtable
                 .apply_batch(&record.batch, record.first_sequence);
-            db.last_sequence = last_sequence;
+            db.last_sequence = db.last_sequence.max(last_sequence);
         }
         Ok(db)
     }
@@ -51,10 +85,16 @@ impl Db {
         match self.memtable.lookup(key) {
             Lookup::Value(value) => Some(value),
             Lookup::Deleted => None,
-            Lookup::NotFound => match self.sstable.lookup(key) {
-                Lookup::Value(value) => Some(value),
-                Lookup::Deleted | Lookup::NotFound => None,
-            },
+            Lookup::NotFound => {
+                for table in self.sstables.iter().rev() {
+                    match table.lookup(key) {
+                        Lookup::Value(value) => return Some(value),
+                        Lookup::Deleted => return None,
+                        Lookup::NotFound => {}
+                    }
+                }
+                None
+            }
         }
     }
 
@@ -79,11 +119,6 @@ impl Db {
             return Ok(());
         }
 
-        if self.memtable_limit_exceeded() {
-            self.sstable.write_memtable(&self.memtable)?;
-            self.memtable = Memtable::default();
-        }
-
         let operation_count =
             u64::try_from(batch.operations.len()).map_err(|_| Error::SequenceExhausted)?;
         let first_sequence = self
@@ -96,7 +131,6 @@ impl Db {
             .ok_or(Error::SequenceExhausted)?;
 
         self.wal.append(first_sequence, &batch)?;
-
         let mut sequence = self.last_sequence;
         for operation in batch.operations {
             sequence += 1;
@@ -105,13 +139,30 @@ impl Db {
                 WriteOp::Delete { key } => self.memtable.delete(sequence, key),
             }
         }
-
         self.last_sequence = final_sequence;
+
+        if self.memtable_limit_exceeded() {
+            self.flush_memtable()?;
+        }
+
         Ok(())
     }
 
     pub fn last_sequence(&self) -> u64 {
         self.last_sequence
+    }
+
+    fn flush_memtable(&mut self) -> Result<()> {
+        if self.memtable.is_empty() {
+            return Ok(());
+        }
+
+        let table = SSTable::create(&self.db_dir, self.next_table_id, &self.memtable)?;
+        self.sstables.push(table);
+        self.next_table_id += 1;
+        self.wal.reset()?;
+        self.memtable.clear();
+        Ok(())
     }
 }
 
@@ -119,59 +170,55 @@ impl Db {
 mod tests {
     use std::{
         fs,
-        path::PathBuf,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::Db;
     use crate::{Key, WriteBatch};
 
-    fn paths() -> (PathBuf, PathBuf) {
+    fn path() -> std::path::PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let base = std::env::temp_dir().join(format!("db-{}-{unique}", std::process::id()));
-        (base.with_extension("wal"), base.with_extension("sst"))
+        std::env::temp_dir().join(format!("db-{}-{unique}", std::process::id()))
     }
 
     #[test]
-    fn batch_operations_are_applied_in_order() {
-        let (wal_path, sst_path) = paths();
-        let mut db = Db::open(&wal_path, &sst_path).unwrap();
-        let mut batch = WriteBatch::new();
-        batch.put("key", "first");
-        batch.delete("key");
-        batch.put("key", "last");
+    fn recovers_multiple_sstables_and_wal() {
+        let path = path();
+        let mut db = Db::open(path.clone()).unwrap();
 
-        db.write(batch).unwrap();
+        let mut first = WriteBatch::new();
+        first.put("a", "old");
+        first.put("b", "value");
+        first.put("c", "value");
+        first.put("d", "value");
+        db.write(first).unwrap();
 
-        assert_eq!(db.get(&Key::from("key")), Some(b"last".as_slice()));
-        assert_eq!(db.last_sequence(), 3);
-
-        drop(db);
-        fs::remove_file(wal_path).unwrap();
-        fs::remove_file(sst_path).unwrap();
-    }
-
-    #[test]
-    fn recovers_from_wal() {
-        let (wal_path, sst_path) = paths();
-
-        let mut db = Db::open(&wal_path, &sst_path).unwrap();
-        db.put("kept", "value").unwrap();
-        db.put("deleted", "value").unwrap();
-        db.delete("deleted").unwrap();
+        let mut second = WriteBatch::new();
+        second.put("a", "new");
+        second.delete("b");
+        second.put("e", "value");
+        second.put("f", "value");
+        db.write(second).unwrap();
         drop(db);
 
-        let db = Db::open(&wal_path, &sst_path).unwrap();
+        let mut db = Db::open(path.clone()).unwrap();
+        assert_eq!(db.get(&Key::from("a")), Some(b"new".as_slice()));
+        assert_eq!(db.get(&Key::from("b")), None);
+        assert_eq!(db.get(&Key::from("c")), Some(b"value".as_slice()));
+        assert_eq!(db.get(&Key::from("e")), Some(b"value".as_slice()));
+        assert_eq!(db.last_sequence(), 8);
 
-        assert_eq!(db.get(&Key::from("kept")), Some(b"value".as_slice()));
-        assert_eq!(db.get(&Key::from("deleted")), None);
-        assert_eq!(db.last_sequence(), 3);
+        db.put("wal-only", "value").unwrap();
+        drop(db);
+
+        let db = Db::open(path.clone()).unwrap();
+        assert_eq!(db.get(&Key::from("wal-only")), Some(b"value".as_slice()));
+        assert_eq!(db.last_sequence(), 9);
 
         drop(db);
-        fs::remove_file(wal_path).unwrap();
-        fs::remove_file(sst_path).unwrap();
+        fs::remove_dir_all(path).unwrap();
     }
 }

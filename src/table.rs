@@ -2,9 +2,12 @@ use super::{
     error::{Error, Result},
     memtable::{Entry, Key, Lookup, Memtable, StoredValue},
 };
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
-use std::path::Path;
+
+use std::{
+    fs::OpenOptions,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 const DELETE: u8 = 1;
 const PUT: u8 = 2;
@@ -13,28 +16,17 @@ const VERSION: u16 = 1;
 
 #[derive(Debug)]
 pub(crate) struct SSTable {
-    file: File,
+    id: u32,
     entries: Vec<(Key, Entry)>,
 }
 
 impl SSTable {
-    pub(crate) fn new(path: impl AsRef<Path>) -> Result<Self> {
-        let file = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(path)?;
-        let mut table = SSTable {
-            file,
-            entries: Vec::new(),
-        };
-        let mut bytes = Vec::new();
-        table.file.read_to_end(&mut bytes)?;
-        if !bytes.is_empty() {
-            table.entries = decode_sstable(&bytes)?;
-        }
-        Ok(table)
+    pub(crate) fn id(&self) -> u32 {
+        self.id
+    }
+
+    pub(crate) fn last_sequence(&self) -> Option<u64> {
+        self.entries.iter().map(|(_, entry)| entry.sequence).max()
     }
 
     fn encode_entry(key: &Key, entry: &Entry, buffer: &mut Vec<u8>) -> Result<()> {
@@ -55,7 +47,7 @@ impl SSTable {
         Ok(())
     }
 
-    pub(crate) fn write_memtable(&mut self, memtable: &Memtable) -> Result<()> {
+    pub(crate) fn create(directory: &PathBuf, id: u32, memtable: &Memtable) -> Result<Self> {
         let mut buffer = Vec::new();
 
         buffer.extend_from_slice(&MAGIC_BYTES);
@@ -72,10 +64,25 @@ impl SSTable {
         buffer.extend_from_slice(&checksum.to_be_bytes());
         let entries = decode_sstable(&buffer)?;
 
-        self.file.write_all(&buffer)?;
-        self.file.sync_all()?;
-        self.entries = entries;
-        Ok(())
+        let file_name = format!("{:08}.sst", id);
+        let tmp_file_name = format!("{}.tmp", file_name);
+        let file = Path::new(&tmp_file_name);
+        let path = Path::new(directory).join(file);
+        let mut file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&path)?;
+        file.write_all(&buffer)?;
+        file.sync_all()?;
+
+        let new_file_name = Path::new(&file_name);
+        let new_file = Path::new(directory).join(new_file_name);
+        std::fs::rename(path, &new_file)?;
+        std::fs::File::open(directory)?.sync_all()?;
+
+        let table = Self { id, entries };
+        Ok(table)
     }
 
     pub(crate) fn lookup(&self, key: &Key) -> Lookup<'_> {
@@ -86,6 +93,17 @@ impl SSTable {
             Ok(index) => self.entries[index].1.lookup(),
             Err(_) => Lookup::NotFound,
         }
+    }
+
+    pub(crate) fn open(path: &Path, id: u32) -> Result<Self> {
+        let mut table = Self {
+            id,
+            entries: Vec::new(),
+        };
+        let bytes = std::fs::read(path)?;
+        let entries = decode_sstable(&bytes)?;
+        table.entries = entries;
+        Ok(table)
     }
 }
 
@@ -190,44 +208,8 @@ impl<'a> Decoder<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use super::{decode_sstable, SSTable};
-    use crate::{
-        memtable::{Lookup, Memtable},
-        Error, Key, Value,
-    };
-
-    fn path() -> std::path::PathBuf {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        std::env::temp_dir().join(format!("sst-{}-{unique}.sst", std::process::id()))
-    }
-
-    #[test]
-    fn reopens_and_looks_up_entries() {
-        let path = path();
-        let mut memtable = Memtable::default();
-        memtable.put(1, Key::from("kept"), Value::from("value"));
-        memtable.delete(2, Key::from("removed"));
-
-        let mut table = SSTable::new(&path).unwrap();
-        table.write_memtable(&memtable).unwrap();
-        drop(table);
-
-        let table = SSTable::new(&path).unwrap();
-        assert_eq!(table.lookup(&Key::from("kept")), Lookup::Value(b"value"));
-        assert_eq!(table.lookup(&Key::from("removed")), Lookup::Deleted);
-        assert_eq!(table.lookup(&Key::from("missing")), Lookup::NotFound);
-
-        drop(table);
-        fs::remove_file(path).unwrap();
-    }
+    use super::decode_sstable;
+    use crate::Error;
 
     #[test]
     fn rejects_corrupt_checksum() {

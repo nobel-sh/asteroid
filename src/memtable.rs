@@ -142,6 +142,13 @@ impl Memtable {
     pub(crate) fn entry_count(&self) -> usize {
         self.entries.len()
     }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+    pub(crate) fn clear(&mut self) {
+        self.entries.clear();
+    }
 }
 
 #[cfg(test)]

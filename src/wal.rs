@@ -257,6 +257,12 @@ impl Wal {
         }
         Ok(records)
     }
+
+    pub(crate) fn reset(&mut self) -> Result<()> {
+        self.file.set_len(0)?;
+        self.file.sync_all()?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
