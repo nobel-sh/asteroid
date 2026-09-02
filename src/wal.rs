@@ -23,6 +23,7 @@ use std::{
 };
 
 use crate::{
+    codec::Decoder,
     error::{Error, Result},
     Key, Value, WriteBatch, WriteOp,
 };
@@ -132,7 +133,7 @@ fn decode_payload(bytes: &[u8]) -> Result<WalRecord> {
     })
 }
 
-fn decode_record(decoder: &mut Decoder) -> Result<WalRecord> {
+fn decode_record(decoder: &mut Decoder<'_>) -> Result<WalRecord> {
     let record_start = decoder.position();
 
     if decoder.take(MAGIC_BYTES.len())? != MAGIC_BYTES {
@@ -152,7 +153,7 @@ fn decode_record(decoder: &mut Decoder) -> Result<WalRecord> {
     let checksum_end = decoder.position();
     let stored_checksum = decoder.read_u32()?;
 
-    let actual_checksum = crc32fast::hash(&decoder.bytes[record_start..checksum_end]);
+    let actual_checksum = crc32fast::hash(&decoder.bytes()[record_start..checksum_end]);
     if stored_checksum != actual_checksum {
         return Err(Error::CorruptWal("checksum mismatch".to_owned()));
     }
@@ -167,62 +168,6 @@ fn validate_sequence_range(first_sequence: u64, operation_count: u32) -> Result<
             .ok_or(Error::SequenceExhausted)?;
     }
     Ok(())
-}
-
-struct Decoder<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-}
-
-impl<'a> Decoder<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, cursor: 0 }
-    }
-
-    fn take(&mut self, length: usize) -> Result<&'a [u8]> {
-        let end = self
-            .cursor
-            .checked_add(length)
-            .ok_or_else(|| Error::CorruptWal("record length overflow".to_owned()))?;
-        let value = self
-            .bytes
-            .get(self.cursor..end)
-            .ok_or_else(|| Error::CorruptWal("truncated record".to_owned()))?;
-        self.cursor = end;
-        Ok(value)
-    }
-
-    fn read_u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn read_u32(&mut self) -> Result<u32> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
-    }
-
-    fn read_u16(&mut self) -> Result<u16> {
-        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
-    }
-
-    fn read_u64(&mut self) -> Result<u64> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
-    }
-
-    fn finish(&self) -> Result<()> {
-        if self.cursor == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(Error::CorruptWal("trailing bytes".to_owned()))
-        }
-    }
-
-    fn position(&self) -> usize {
-        self.cursor
-    }
-
-    fn is_empty(&self) -> bool {
-        self.cursor == self.bytes.len()
-    }
 }
 
 #[derive(Debug)]
@@ -272,8 +217,8 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{decode_record, Decoder, Wal, WalRecord};
-    use crate::WriteBatch;
+    use super::{decode_record, Wal, WalRecord};
+    use crate::{codec::Decoder, WriteBatch};
 
     #[test]
     fn batch_round_trips_through_a_file() {

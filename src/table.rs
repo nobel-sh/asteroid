@@ -1,6 +1,8 @@
 use super::{
+    codec::Decoder,
+    data_block::{decode_entries, encode_entry},
     error::{Error, Result},
-    memtable::{Entry, Key, Lookup, Memtable, StoredValue},
+    memtable::{Entry, Key, Lookup, Memtable},
 };
 
 use std::{
@@ -9,8 +11,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const DELETE: u8 = 1;
-const PUT: u8 = 2;
 const MAGIC_BYTES: [u8; 4] = *b"SST1";
 const VERSION: u16 = 1;
 
@@ -29,24 +29,6 @@ impl SSTable {
         self.entries.iter().map(|(_, entry)| entry.sequence).max()
     }
 
-    fn encode_entry(key: &Key, entry: &Entry, buffer: &mut Vec<u8>) -> Result<()> {
-        let key_bytes = key.as_bytes();
-        let (kind, value_bytes) = match &entry.value {
-            StoredValue::Data(data) => (PUT, data.as_bytes()),
-            StoredValue::Tombstone => (DELETE, &[][..]),
-        };
-        let key_size = u32::try_from(key_bytes.len()).map_err(|_| Error::RecordTooLarge)?;
-        let value_size = u32::try_from(value_bytes.len()).map_err(|_| Error::RecordTooLarge)?;
-
-        buffer.extend_from_slice(&entry.sequence.to_be_bytes());
-        buffer.push(kind);
-        buffer.extend_from_slice(&key_size.to_be_bytes());
-        buffer.extend_from_slice(&value_size.to_be_bytes());
-        buffer.extend_from_slice(key_bytes);
-        buffer.extend_from_slice(value_bytes);
-        Ok(())
-    }
-
     pub(crate) fn create(directory: &PathBuf, id: u32, memtable: &Memtable) -> Result<Self> {
         let mut buffer = Vec::new();
 
@@ -57,7 +39,7 @@ impl SSTable {
         buffer.extend_from_slice(&entry_count.to_be_bytes());
 
         for (key, entry) in memtable.iter() {
-            Self::encode_entry(key, entry, &mut buffer)?;
+            encode_entry(key, entry, &mut buffer)?;
         }
 
         let checksum = crc32fast::hash(&buffer);
@@ -128,82 +110,13 @@ fn decode_sstable(bytes: &[u8]) -> Result<Vec<(Key, Entry)>> {
     }
 
     let entry_count = decoder.read_u32()?;
-    let mut entries = Vec::new();
-    for _ in 0..entry_count {
-        let sequence = decoder.read_u64()?;
-        let kind = decoder.read_u8()?;
-        let key_size = decoder.read_u32()? as usize;
-        let value_size = decoder.read_u32()? as usize;
-        let key = Key::from(decoder.take(key_size)?.to_vec());
-        let value = match kind {
-            DELETE if value_size == 0 => StoredValue::Tombstone,
-            DELETE => return Err(corrupt("delete entry has a value")),
-            PUT => StoredValue::Data(decoder.take(value_size)?.to_vec().into()),
-            _ => return Err(corrupt(format!("unknown entry kind {kind}"))),
-        };
-
-        if entries
-            .last()
-            .is_some_and(|(previous, _): &(Key, Entry)| previous >= &key)
-        {
-            return Err(corrupt("entries are not strictly sorted"));
-        }
-        entries.push((key, Entry { sequence, value }));
-    }
+    let entries = decode_entries(&mut decoder, entry_count)?;
     decoder.finish()?;
     Ok(entries)
 }
 
 fn corrupt(message: impl Into<String>) -> Error {
     Error::CorruptSstable(message.into())
-}
-
-struct Decoder<'a> {
-    bytes: &'a [u8],
-    cursor: usize,
-}
-
-impl<'a> Decoder<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, cursor: 0 }
-    }
-
-    fn take(&mut self, length: usize) -> Result<&'a [u8]> {
-        let end = self
-            .cursor
-            .checked_add(length)
-            .ok_or_else(|| corrupt("entry length overflow"))?;
-        let value = self
-            .bytes
-            .get(self.cursor..end)
-            .ok_or_else(|| corrupt("truncated entry"))?;
-        self.cursor = end;
-        Ok(value)
-    }
-
-    fn read_u8(&mut self) -> Result<u8> {
-        Ok(self.take(1)?[0])
-    }
-
-    fn read_u16(&mut self) -> Result<u16> {
-        Ok(u16::from_be_bytes(self.take(2)?.try_into().unwrap()))
-    }
-
-    fn read_u32(&mut self) -> Result<u32> {
-        Ok(u32::from_be_bytes(self.take(4)?.try_into().unwrap()))
-    }
-
-    fn read_u64(&mut self) -> Result<u64> {
-        Ok(u64::from_be_bytes(self.take(8)?.try_into().unwrap()))
-    }
-
-    fn finish(&self) -> Result<()> {
-        if self.cursor == self.bytes.len() {
-            Ok(())
-        } else {
-            Err(corrupt("trailing bytes"))
-        }
-    }
 }
 
 #[cfg(test)]

@@ -1,3 +1,6 @@
+mod codec;
+#[cfg_attr(not(test), allow(dead_code))]
+mod data_block;
 mod db;
 mod error;
 mod memtable;
@@ -6,6 +9,6 @@ mod wal;
 mod write;
 
 pub use db::Db;
-pub use error::{Error, Result};
+pub use error::{DecodeError, Error, Result};
 pub use memtable::{Key, Value};
 pub use write::{WriteBatch, WriteOp};
