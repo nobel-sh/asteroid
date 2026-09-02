@@ -1,15 +1,11 @@
 use super::{
     codec::Decoder,
-    data_block::{decode_entries, encode_entry},
+    data_block::{build_data_blocks, decode_data_blocks},
     error::{Error, Result},
     memtable::{Entry, Key, Lookup, Memtable},
 };
 
-use std::{
-    fs::OpenOptions,
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::{fs::OpenOptions, io::Write, path::Path};
 
 const MAGIC_BYTES: [u8; 4] = *b"SST1";
 const VERSION: u16 = 1;
@@ -29,27 +25,21 @@ impl SSTable {
         self.entries.iter().map(|(_, entry)| entry.sequence).max()
     }
 
-    pub(crate) fn create(directory: &PathBuf, id: u32, memtable: &Memtable) -> Result<Self> {
+    pub(crate) fn create(directory: &Path, id: u32, memtable: &Memtable) -> Result<Self> {
         let mut buffer = Vec::new();
 
         buffer.extend_from_slice(&MAGIC_BYTES);
         buffer.extend_from_slice(&VERSION.to_be_bytes());
-        let entry_count =
-            u32::try_from(memtable.entry_count()).map_err(|_| Error::RecordTooLarge)?;
-        buffer.extend_from_slice(&entry_count.to_be_bytes());
 
-        for (key, entry) in memtable.iter() {
-            encode_entry(key, entry, &mut buffer)?;
+        for block in build_data_blocks(memtable)? {
+            buffer.extend_from_slice(&block.bytes);
         }
 
-        let checksum = crc32fast::hash(&buffer);
-        buffer.extend_from_slice(&checksum.to_be_bytes());
         let entries = decode_sstable(&buffer)?;
 
         let file_name = format!("{:08}.sst", id);
         let tmp_file_name = format!("{}.tmp", file_name);
-        let file = Path::new(&tmp_file_name);
-        let path = Path::new(directory).join(file);
+        let path = directory.join(tmp_file_name);
         let mut file = OpenOptions::new()
             .create(true)
             .write(true)
@@ -58,13 +48,11 @@ impl SSTable {
         file.write_all(&buffer)?;
         file.sync_all()?;
 
-        let new_file_name = Path::new(&file_name);
-        let new_file = Path::new(directory).join(new_file_name);
+        let new_file = directory.join(file_name);
         std::fs::rename(path, &new_file)?;
         std::fs::File::open(directory)?.sync_all()?;
 
-        let table = Self { id, entries };
-        Ok(table)
+        Ok(Self { id, entries })
     }
 
     pub(crate) fn lookup(&self, key: &Key) -> Lookup<'_> {
@@ -78,29 +66,15 @@ impl SSTable {
     }
 
     pub(crate) fn open(path: &Path, id: u32) -> Result<Self> {
-        let mut table = Self {
+        Ok(Self {
             id,
-            entries: Vec::new(),
-        };
-        let bytes = std::fs::read(path)?;
-        let entries = decode_sstable(&bytes)?;
-        table.entries = entries;
-        Ok(table)
+            entries: decode_sstable(&std::fs::read(path)?)?,
+        })
     }
 }
 
 fn decode_sstable(bytes: &[u8]) -> Result<Vec<(Key, Entry)>> {
-    let checksum_start = bytes
-        .len()
-        .checked_sub(4)
-        .ok_or_else(|| corrupt("truncated checksum"))?;
-    let (contents, checksum_bytes) = bytes.split_at(checksum_start);
-    let stored_checksum = u32::from_be_bytes(checksum_bytes.try_into().unwrap());
-    if crc32fast::hash(contents) != stored_checksum {
-        return Err(corrupt("checksum mismatch"));
-    }
-
-    let mut decoder = Decoder::new(contents);
+    let mut decoder = Decoder::new(bytes);
     if decoder.take(MAGIC_BYTES.len())? != MAGIC_BYTES {
         return Err(corrupt("invalid magic bytes"));
     }
@@ -109,9 +83,17 @@ fn decode_sstable(bytes: &[u8]) -> Result<Vec<(Key, Entry)>> {
         return Err(corrupt(format!("unsupported version {version}")));
     }
 
-    let entry_count = decoder.read_u32()?;
-    let entries = decode_entries(&mut decoder, entry_count)?;
-    decoder.finish()?;
+    let mut entries = Vec::new();
+    for block in decode_data_blocks(&decoder.bytes()[decoder.position()..])? {
+        if entries
+            .last()
+            .zip(block.entries.first())
+            .is_some_and(|((previous_key, _), (next_key, _))| previous_key >= next_key)
+        {
+            return Err(corrupt("entries are not strictly sorted"));
+        }
+        entries.extend(block.entries);
+    }
     Ok(entries)
 }
 
@@ -134,7 +116,7 @@ mod tests {
 
         assert!(matches!(
             decode_sstable(&bytes),
-            Err(Error::CorruptSstable(message)) if message == "checksum mismatch"
+            Err(Error::CorruptSstable(message)) if message == "data block checksum mismatch"
         ));
     }
 }
