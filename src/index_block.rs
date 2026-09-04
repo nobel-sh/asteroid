@@ -1,23 +1,16 @@
-use crate::{
-    codec::Decoder,
-    data_block::{DataBlock, EncodedDataBlock},
-    Error, Key, Result,
-};
+use crate::{codec::Decoder, data_block::EncodedDataBlock, Error, Key, Result};
 
+#[derive(Debug)]
 pub(crate) struct IndexEntry {
-    last_key_size: u32,
     last_key: Key,
     block_offset: u64,
-    block_size: u32,
+    pub block_size: u32,
 }
 
 impl IndexEntry {
     fn from_data_block(block: &EncodedDataBlock, block_offset: u64) -> Result<Self> {
         let block_size = u32::try_from(block.bytes.len()).map_err(|_| Error::RecordTooLarge)?;
-        let last_key_size =
-            u32::try_from(block.last_key.as_bytes().len()).map_err(|_| Error::RecordTooLarge)?;
         Ok(Self {
-            last_key_size,
             last_key: block.last_key.clone(),
             block_offset,
             block_size,
@@ -25,6 +18,7 @@ impl IndexEntry {
     }
 }
 
+#[derive(Debug)]
 pub(crate) struct IndexBlock {
     entries: Vec<IndexEntry>,
 }
@@ -35,7 +29,9 @@ impl IndexBlock {
         let entry_count = u32::try_from(self.entries.len()).map_err(|_| Error::RecordTooLarge)?;
         index_buffer.extend_from_slice(&entry_count.to_be_bytes());
         for entry in &self.entries {
-            index_buffer.extend_from_slice(&entry.last_key_size.to_be_bytes());
+            let last_key_size = u32::try_from(entry.last_key.as_bytes().len())
+                .map_err(|_| Error::RecordTooLarge)?;
+            index_buffer.extend_from_slice(&last_key_size.to_be_bytes());
             index_buffer.extend_from_slice(entry.last_key.as_bytes());
             index_buffer.extend_from_slice(&entry.block_offset.to_be_bytes());
             index_buffer.extend_from_slice(&entry.block_size.to_be_bytes());
@@ -89,7 +85,6 @@ impl IndexBlock {
                 return Err(corrupt("index keys are not strictly sorted"));
             }
             entries.push(IndexEntry {
-                last_key_size,
                 last_key,
                 block_offset,
                 block_size,
@@ -100,19 +95,25 @@ impl IndexBlock {
         Ok(IndexBlock { entries })
     }
 
-    pub(crate) fn validate_last_keys(&self, data_blocks: &[DataBlock]) -> Result<()> {
-        if self.entries.len() != data_blocks.len() {
-            return Err(corrupt("index entry count does not match data blocks"));
-        }
+    pub(crate) fn find_block(&self, key: &Key) -> Option<(&Key, u64, u32)> {
+        let position = self.entries.partition_point(|entry| entry.last_key < *key);
+        self.entries
+            .get(position)
+            .map(|entry| (&entry.last_key, entry.block_offset, entry.block_size))
+    }
 
-        for (index_entry, data_block) in self.entries.iter().zip(data_blocks) {
-            if data_block
-                .entries
-                .last()
-                .is_none_or(|(last_key, _)| last_key != &index_entry.last_key)
-            {
-                return Err(corrupt("index key does not match data block"));
+    pub(crate) fn validate_block_handles(&self, data_offset: u64, index_offset: u64) -> Result<()> {
+        let mut expected_offset = data_offset;
+        for entry in &self.entries {
+            if entry.block_offset != expected_offset || entry.block_size == 0 {
+                return Err(corrupt("invalid data block location"));
             }
+            expected_offset = expected_offset
+                .checked_add(u64::from(entry.block_size))
+                .ok_or_else(|| corrupt("data block location overflow"))?;
+        }
+        if expected_offset != index_offset {
+            return Err(corrupt("index does not cover the data block region"));
         }
         Ok(())
     }

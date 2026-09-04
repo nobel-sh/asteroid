@@ -6,7 +6,7 @@ use std::{
 use super::{
     error::{Error, Result},
     memtable::{Key, Lookup, Memtable, Value},
-    table::SSTable,
+    table::{SSTable, TableLookup},
     wal::Wal,
     write::{WriteBatch, WriteOp},
 };
@@ -51,7 +51,7 @@ impl Db {
         let next_table_id = table_list.last().map_or(1, |table| table.id() + 1);
         let last_sequence = table_list
             .iter()
-            .filter_map(SSTable::last_sequence)
+            .map(SSTable::last_sequence)
             .max()
             .unwrap_or(0);
 
@@ -81,19 +81,19 @@ impl Db {
         Ok(db)
     }
 
-    pub fn get(&self, key: &Key) -> Option<&[u8]> {
+    pub fn get(&self, key: &Key) -> Result<Option<Value>> {
         match self.memtable.lookup(key) {
-            Lookup::Value(value) => Some(value),
-            Lookup::Deleted => None,
+            Lookup::Value(value) => Ok(Some(Value::from(value))),
+            Lookup::Deleted => Ok(None),
             Lookup::NotFound => {
                 for table in self.sstables.iter().rev() {
-                    match table.lookup(key) {
-                        Lookup::Value(value) => return Some(value),
-                        Lookup::Deleted => return None,
-                        Lookup::NotFound => {}
+                    match table.lookup(key)? {
+                        TableLookup::Value(value) => return Ok(Some(value)),
+                        TableLookup::Deleted => return Ok(None),
+                        TableLookup::NotFound => {}
                     }
                 }
-                None
+                Ok(None)
             }
         }
     }
@@ -205,17 +205,20 @@ mod tests {
         drop(db);
 
         let mut db = Db::open(path.clone()).unwrap();
-        assert_eq!(db.get(&Key::from("a")), Some(b"new".as_slice()));
-        assert_eq!(db.get(&Key::from("b")), None);
-        assert_eq!(db.get(&Key::from("c")), Some(b"value".as_slice()));
-        assert_eq!(db.get(&Key::from("e")), Some(b"value".as_slice()));
+        assert_eq!(db.get(&Key::from("a")).unwrap(), Some("new".into()));
+        assert_eq!(db.get(&Key::from("b")).unwrap(), None);
+        assert_eq!(db.get(&Key::from("c")).unwrap(), Some("value".into()));
+        assert_eq!(db.get(&Key::from("e")).unwrap(), Some("value".into()));
         assert_eq!(db.last_sequence(), 8);
 
         db.put("wal-only", "value").unwrap();
         drop(db);
 
         let db = Db::open(path.clone()).unwrap();
-        assert_eq!(db.get(&Key::from("wal-only")), Some(b"value".as_slice()));
+        assert_eq!(
+            db.get(&Key::from("wal-only")).unwrap(),
+            Some("value".into())
+        );
         assert_eq!(db.last_sequence(), 9);
 
         drop(db);

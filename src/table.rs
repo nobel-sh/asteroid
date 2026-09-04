@@ -1,22 +1,35 @@
 use super::{
     codec::Decoder,
-    data_block::{build_data_blocks, decode_data_blocks},
+    data_block::{build_data_blocks, decode_data_block},
     error::{Error, Result},
     index_block::IndexBlock,
-    memtable::{Entry, Key, Lookup, Memtable},
+    memtable::{Key, Memtable, StoredValue, Value},
 };
 
-use std::{fs::OpenOptions, io::Write, path::Path};
+use std::{
+    fs::{File, OpenOptions},
+    io::Write,
+    os::unix::fs::FileExt,
+    path::Path,
+};
 
 const MAGIC_BYTES: [u8; 4] = *b"SST1";
 const VERSION: u16 = 1;
 const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>();
-const FOOTER_SIZE: usize = size_of::<u64>() + size_of::<u32>();
+const FOOTER_SIZE: usize = size_of::<u64>() + size_of::<u32>() + size_of::<u64>();
 
 #[derive(Debug)]
 pub(crate) struct SSTable {
     id: u32,
-    entries: Vec<(Key, Entry)>,
+    file: File,
+    index: IndexBlock,
+    last_sequence: u64,
+}
+
+pub(crate) enum TableLookup {
+    Value(Value),
+    Deleted,
+    NotFound,
 }
 
 impl SSTable {
@@ -24,12 +37,18 @@ impl SSTable {
         self.id
     }
 
-    pub(crate) fn last_sequence(&self) -> Option<u64> {
-        self.entries.iter().map(|(_, entry)| entry.sequence).max()
+    pub(crate) fn last_sequence(&self) -> u64 {
+        self.last_sequence
     }
 
     pub(crate) fn create(directory: &Path, id: u32, memtable: &Memtable) -> Result<Self> {
         let mut buffer = Vec::new();
+
+        let last_sequence = memtable
+            .iter()
+            .map(|(_, entry)| entry.sequence)
+            .max()
+            .unwrap_or(0);
 
         buffer.extend_from_slice(&MAGIC_BYTES);
         buffer.extend_from_slice(&VERSION.to_be_bytes());
@@ -44,10 +63,10 @@ impl SSTable {
         let index_bytes = index.as_bytes()?;
         let index_size = u32::try_from(index_bytes.len()).map_err(|_| Error::RecordTooLarge)?;
         buffer.extend_from_slice(&index_bytes);
+
         buffer.extend_from_slice(&index_offset.to_be_bytes());
         buffer.extend_from_slice(&index_size.to_be_bytes());
-
-        let entries = decode_sstable(&buffer)?;
+        buffer.extend_from_slice(&last_sequence.to_be_bytes());
 
         let file_name = format!("{:08}.sst", id);
         let tmp_file_name = format!("{}.tmp", file_name);
@@ -64,90 +83,95 @@ impl SSTable {
         std::fs::rename(path, &new_file)?;
         std::fs::File::open(directory)?.sync_all()?;
 
-        Ok(Self { id, entries })
+        let file = OpenOptions::new().read(true).open(new_file)?;
+
+        Ok(Self {
+            id,
+            file,
+            index,
+            last_sequence,
+        })
     }
 
-    pub(crate) fn lookup(&self, key: &Key) -> Lookup<'_> {
-        match self
+    pub(crate) fn lookup(&self, key: &Key) -> Result<TableLookup> {
+        let Some((expected_last_key, block_offset, block_size)) = self.index.find_block(key) else {
+            return Ok(TableLookup::NotFound);
+        };
+        let block_size = usize::try_from(block_size).map_err(|_| Error::RecordTooLarge)?;
+        let mut bytes = vec![0; block_size];
+        self.file.read_exact_at(&mut bytes, block_offset)?;
+
+        let mut block = decode_data_block(&bytes)?;
+        if block
+            .entries
+            .last()
+            .is_none_or(|(last_key, _)| last_key != expected_last_key)
+        {
+            return Err(corrupt("index key does not match data block"));
+        }
+
+        let Ok(position) = block
             .entries
             .binary_search_by(|(stored_key, _)| stored_key.cmp(key))
-        {
-            Ok(index) => self.entries[index].1.lookup(),
-            Err(_) => Lookup::NotFound,
+        else {
+            return Ok(TableLookup::NotFound);
+        };
+        match block.entries.swap_remove(position).1.value {
+            StoredValue::Data(value) => Ok(TableLookup::Value(value)),
+            StoredValue::Tombstone => Ok(TableLookup::Deleted),
         }
     }
 
     pub(crate) fn open(path: &Path, id: u32) -> Result<Self> {
+        let file = OpenOptions::new().read(true).open(path)?;
+        let (index, last_sequence) = read_and_validate_metadata(&file)?;
+
         Ok(Self {
             id,
-            entries: decode_sstable(&std::fs::read(path)?)?,
+            file,
+            last_sequence,
+            index,
         })
     }
 }
 
-fn decode_sstable(bytes: &[u8]) -> Result<Vec<(Key, Entry)>> {
-    let footer_offset = bytes
-        .len()
-        .checked_sub(FOOTER_SIZE)
+fn read_and_validate_metadata(file: &File) -> Result<(IndexBlock, u64)> {
+    let file_size = file.metadata()?.len();
+    let footer_offset = file_size
+        .checked_sub(FOOTER_SIZE as u64)
         .ok_or_else(|| corrupt("truncated footer"))?;
-    let mut footer = Decoder::new(&bytes[footer_offset..]);
-    let index_offset =
-        usize::try_from(footer.read_u64()?).map_err(|_| corrupt("index offset is too large"))?;
-    let index_size = footer.read_u32()? as usize;
-    footer.finish()?;
-    if index_offset < HEADER_SIZE || index_offset.checked_add(index_size) != Some(footer_offset) {
-        return Err(corrupt("invalid index location"));
-    }
 
-    let mut decoder = Decoder::new(bytes);
-    if decoder.take(MAGIC_BYTES.len())? != MAGIC_BYTES {
+    let mut header_bytes = [0; HEADER_SIZE];
+    file.read_exact_at(&mut header_bytes, 0)?;
+    let mut header = Decoder::new(&header_bytes);
+    if header.take(MAGIC_BYTES.len())? != MAGIC_BYTES {
         return Err(corrupt("invalid magic bytes"));
     }
-    let version = decoder.read_u16()?;
+    let version = header.read_u16()?;
     if version != VERSION {
         return Err(corrupt(format!("unsupported version {version}")));
     }
 
-    let index = IndexBlock::decode_index_block(&bytes[index_offset..footer_offset])?;
-    let blocks = decode_data_blocks(&bytes[decoder.position()..index_offset])?;
-    index.validate_last_keys(&blocks)?;
-
-    let mut entries = Vec::new();
-    for block in blocks {
-        if entries
-            .last()
-            .zip(block.entries.first())
-            .is_some_and(|((previous_key, _), (next_key, _))| previous_key >= next_key)
-        {
-            return Err(corrupt("entries are not strictly sorted"));
-        }
-        entries.extend(block.entries);
+    let mut footer_bytes = [0; FOOTER_SIZE];
+    file.read_exact_at(&mut footer_bytes, footer_offset)?;
+    let mut footer = Decoder::new(&footer_bytes);
+    let index_offset = footer.read_u64()?;
+    let index_size = footer.read_u32()?;
+    let last_sequence = footer.read_u64()?;
+    footer.finish()?;
+    if index_offset < HEADER_SIZE as u64
+        || index_offset.checked_add(u64::from(index_size)) != Some(footer_offset)
+    {
+        return Err(corrupt("invalid index location"));
     }
-    Ok(entries)
+
+    let mut index_bytes = vec![0; index_size as usize];
+    file.read_exact_at(&mut index_bytes, index_offset)?;
+    let index = IndexBlock::decode_index_block(&index_bytes)?;
+    index.validate_block_handles(HEADER_SIZE as u64, index_offset)?;
+    Ok((index, last_sequence))
 }
 
 fn corrupt(message: impl Into<String>) -> Error {
     Error::CorruptSstable(message.into())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::decode_sstable;
-    use crate::Error;
-
-    #[test]
-    fn rejects_corrupt_checksum() {
-        let mut bytes = Vec::new();
-        bytes.extend_from_slice(b"SST1");
-        bytes.extend_from_slice(&1_u16.to_be_bytes());
-        bytes.extend_from_slice(&0_u32.to_be_bytes());
-        bytes.extend_from_slice(&0_u32.to_be_bytes());
-        bytes.extend_from_slice(&6_u64.to_be_bytes());
-        bytes.extend_from_slice(&8_u32.to_be_bytes());
-
-        assert!(matches!(
-            decode_sstable(&bytes),
-            Err(Error::CorruptSstable(message)) if message == "index block checksum mismatch"
-        ));
-    }
 }

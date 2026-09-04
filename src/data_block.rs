@@ -63,7 +63,7 @@ impl DataBlockBuilder {
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.buffer.is_empty() && self.entry_count == 0
+        self.entry_count == 0
     }
 }
 
@@ -123,15 +123,6 @@ pub(crate) fn decode_data_block(bytes: &[u8]) -> Result<DataBlock> {
     Ok(block)
 }
 
-pub(crate) fn decode_data_blocks(bytes: &[u8]) -> Result<Vec<DataBlock>> {
-    let mut decoder = Decoder::new(bytes);
-    let mut blocks = Vec::new();
-    while !decoder.is_empty() {
-        blocks.push(decode_block(&mut decoder)?);
-    }
-    Ok(blocks)
-}
-
 fn decode_block(decoder: &mut Decoder<'_>) -> Result<DataBlock> {
     let block_start = decoder.position();
     let entry_count = decoder.read_u32()?;
@@ -180,7 +171,7 @@ fn corrupt(message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_data_blocks, decode_data_block, decode_data_blocks};
+    use super::{build_data_blocks, decode_data_block};
     use crate::{memtable::Memtable, Key, Value};
 
     #[test]
@@ -194,7 +185,6 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert_eq!(blocks[0].last_key, Key::from("a"));
         assert_eq!(blocks[1].last_key, Key::from("b"));
-        let mut file = Vec::new();
         for block in &blocks {
             let checksum_at = block.bytes.len() - 4;
             assert_eq!(
@@ -203,12 +193,6 @@ mod tests {
             );
             let decoded = decode_data_block(&block.bytes).unwrap();
             assert_eq!(decoded.entries.last().unwrap().0, block.last_key);
-            file.extend_from_slice(&block.bytes);
         }
-
-        let decoded = decode_data_blocks(&file).unwrap();
-        assert_eq!(decoded.len(), 2);
-        assert_eq!(decoded[0].entries.last().unwrap().0, Key::from("a"));
-        assert_eq!(decoded[1].entries.last().unwrap().0, Key::from("b"));
     }
 }
