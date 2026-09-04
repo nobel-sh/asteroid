@@ -2,6 +2,7 @@ use super::{
     codec::Decoder,
     data_block::{build_data_blocks, decode_data_blocks},
     error::{Error, Result},
+    index_block::IndexBlock,
     memtable::{Entry, Key, Lookup, Memtable},
 };
 
@@ -9,6 +10,8 @@ use std::{fs::OpenOptions, io::Write, path::Path};
 
 const MAGIC_BYTES: [u8; 4] = *b"SST1";
 const VERSION: u16 = 1;
+const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>();
+const FOOTER_SIZE: usize = size_of::<u64>() + size_of::<u32>();
 
 #[derive(Debug)]
 pub(crate) struct SSTable {
@@ -31,9 +34,18 @@ impl SSTable {
         buffer.extend_from_slice(&MAGIC_BYTES);
         buffer.extend_from_slice(&VERSION.to_be_bytes());
 
-        for block in build_data_blocks(memtable)? {
+        let blocks = build_data_blocks(memtable)?;
+        let index = IndexBlock::from_data_blocks(&blocks, HEADER_SIZE as u64)?;
+        for block in &blocks {
             buffer.extend_from_slice(&block.bytes);
         }
+
+        let index_offset = u64::try_from(buffer.len()).map_err(|_| Error::RecordTooLarge)?;
+        let index_bytes = index.as_bytes()?;
+        let index_size = u32::try_from(index_bytes.len()).map_err(|_| Error::RecordTooLarge)?;
+        buffer.extend_from_slice(&index_bytes);
+        buffer.extend_from_slice(&index_offset.to_be_bytes());
+        buffer.extend_from_slice(&index_size.to_be_bytes());
 
         let entries = decode_sstable(&buffer)?;
 
@@ -74,6 +86,19 @@ impl SSTable {
 }
 
 fn decode_sstable(bytes: &[u8]) -> Result<Vec<(Key, Entry)>> {
+    let footer_offset = bytes
+        .len()
+        .checked_sub(FOOTER_SIZE)
+        .ok_or_else(|| corrupt("truncated footer"))?;
+    let mut footer = Decoder::new(&bytes[footer_offset..]);
+    let index_offset =
+        usize::try_from(footer.read_u64()?).map_err(|_| corrupt("index offset is too large"))?;
+    let index_size = footer.read_u32()? as usize;
+    footer.finish()?;
+    if index_offset < HEADER_SIZE || index_offset.checked_add(index_size) != Some(footer_offset) {
+        return Err(corrupt("invalid index location"));
+    }
+
     let mut decoder = Decoder::new(bytes);
     if decoder.take(MAGIC_BYTES.len())? != MAGIC_BYTES {
         return Err(corrupt("invalid magic bytes"));
@@ -83,8 +108,12 @@ fn decode_sstable(bytes: &[u8]) -> Result<Vec<(Key, Entry)>> {
         return Err(corrupt(format!("unsupported version {version}")));
     }
 
+    let index = IndexBlock::decode_index_block(&bytes[index_offset..footer_offset])?;
+    let blocks = decode_data_blocks(&bytes[decoder.position()..index_offset])?;
+    index.validate_last_keys(&blocks)?;
+
     let mut entries = Vec::new();
-    for block in decode_data_blocks(&decoder.bytes()[decoder.position()..])? {
+    for block in blocks {
         if entries
             .last()
             .zip(block.entries.first())
@@ -113,10 +142,12 @@ mod tests {
         bytes.extend_from_slice(&1_u16.to_be_bytes());
         bytes.extend_from_slice(&0_u32.to_be_bytes());
         bytes.extend_from_slice(&0_u32.to_be_bytes());
+        bytes.extend_from_slice(&6_u64.to_be_bytes());
+        bytes.extend_from_slice(&8_u32.to_be_bytes());
 
         assert!(matches!(
             decode_sstable(&bytes),
-            Err(Error::CorruptSstable(message)) if message == "data block checksum mismatch"
+            Err(Error::CorruptSstable(message)) if message == "index block checksum mismatch"
         ));
     }
 }

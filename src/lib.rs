@@ -1,8 +1,8 @@
 mod codec;
-#[cfg_attr(not(test), allow(dead_code))]
 mod data_block;
 mod db;
 mod error;
+mod index_block;
 mod memtable;
 mod table;
 mod wal;
