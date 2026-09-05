@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     codec::Decoder,
-    entry::{Key, Lookup, StoredValue, Value},
+    entry::{Entry, Key, Lookup, StoredValue, Value},
     error::{Error, Result},
     memtable::Memtable,
 };
@@ -13,7 +13,7 @@ use std::{
     fs::{File, OpenOptions},
     io::Write,
     os::unix::fs::FileExt,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 const MAGIC_BYTES: [u8; 4] = *b"SST1";
@@ -34,18 +34,35 @@ impl SSTable {
         self.id
     }
 
+    pub(crate) fn path(&self, directory: &Path) -> PathBuf {
+        let table_file = format!("{:08}.sst", self.id);
+        directory.join(table_file)
+    }
+
     pub(crate) fn last_sequence(&self) -> u64 {
         self.last_sequence
     }
 
-    pub(crate) fn create(directory: &Path, id: u32, memtable: &Memtable) -> Result<Self> {
-        let mut buffer = Vec::new();
+    pub(crate) fn read_all_entries(&self) -> Result<Vec<(Key, Entry)>> {
+        let mut entries = Vec::new();
+        for index in &self.index.entries {
+            let block_size =
+                usize::try_from(index.block_size).map_err(|_| Error::RecordTooLarge)?;
+            let mut buffer = vec![0; block_size];
+            self.file.read_exact_at(&mut buffer, index.block_offset)?;
+            let data_block = decode_data_block(&buffer)?;
+            entries.extend(data_block.entries);
+        }
+        Ok(entries)
+    }
 
-        let last_sequence = memtable
-            .iter()
-            .map(|(_, entry)| entry.sequence)
-            .max()
-            .unwrap_or(0);
+    pub(crate) fn create(
+        directory: &Path,
+        id: u32,
+        memtable: &Memtable,
+        last_sequence: u64,
+    ) -> Result<Self> {
+        let mut buffer = Vec::new();
 
         buffer.extend_from_slice(&MAGIC_BYTES);
         buffer.extend_from_slice(&VERSION.to_be_bytes());

@@ -3,9 +3,9 @@ use crate::{codec::Decoder, entry::Key, Error, Result};
 
 #[derive(Debug)]
 pub(crate) struct IndexEntry {
-    last_key: Key,
-    block_offset: u64,
-    pub block_size: u32,
+    pub(crate) last_key: Key,
+    pub(crate) block_offset: u64,
+    pub(crate) block_size: u32,
 }
 
 impl IndexEntry {
@@ -21,7 +21,7 @@ impl IndexEntry {
 
 #[derive(Debug)]
 pub(crate) struct IndexBlock {
-    entries: Vec<IndexEntry>,
+    pub(crate) entries: Vec<IndexEntry>,
 }
 
 impl IndexBlock {

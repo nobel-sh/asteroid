@@ -1,7 +1,10 @@
 use std::{
+    collections::BTreeMap,
     ffi::OsStr,
     path::{Path, PathBuf},
 };
+
+use crate::entry::{Entry, StoredValue};
 
 use super::{
     entry::{Key, Lookup, Value},
@@ -13,6 +16,7 @@ use super::{
 };
 
 const MEMTABLE_LIMIT: usize = 4;
+const COMPACTION_TRIGGER: usize = 2;
 
 #[derive(Debug)]
 pub struct Db {
@@ -158,11 +162,78 @@ impl Db {
             return Ok(());
         }
 
-        let table = SSTable::create(&self.db_dir, self.next_table_id, &self.memtable)?;
+        let table = SSTable::create(
+            &self.db_dir,
+            self.next_table_id,
+            &self.memtable,
+            self.last_sequence,
+        )?;
         self.sstables.push(table);
-        self.next_table_id += 1;
+        self.next_table_id = self
+            .next_table_id
+            .checked_add(1)
+            .ok_or(Error::TableIdExhausted)?;
         self.wal.reset()?;
         self.memtable.clear();
+        if self.sstables.len() >= COMPACTION_TRIGGER {
+            self.compact()?;
+        }
+        Ok(())
+    }
+
+    fn compact(&mut self) -> Result<()> {
+        if self.sstables.len() < 2 {
+            return Ok(());
+        }
+
+        let last_sequence = self
+            .sstables
+            .iter()
+            .map(SSTable::last_sequence)
+            .max()
+            .unwrap_or(0);
+
+        let mut merged: BTreeMap<Key, Entry> = BTreeMap::new();
+        for table in &self.sstables {
+            for (key, entry) in table.read_all_entries()? {
+                if merged
+                    .get(&key)
+                    .is_none_or(|current| entry.sequence > current.sequence)
+                {
+                    merged.insert(key, entry);
+                }
+            }
+        }
+
+        merged.retain(|_, entry| !matches!(entry.value, StoredValue::Tombstone));
+        let mut compacted = Memtable::default();
+        for (key, entry) in merged {
+            compacted.apply(key, entry);
+        }
+
+        let replacement =
+            SSTable::create(&self.db_dir, self.next_table_id, &compacted, last_sequence)?;
+        self.next_table_id = self
+            .next_table_id
+            .checked_add(1)
+            .ok_or(Error::TableIdExhausted)?;
+
+        let old_paths: Vec<_> = self
+            .sstables
+            .iter()
+            .map(|table| table.path(&self.db_dir))
+            .collect();
+        let old_tables = std::mem::replace(&mut self.sstables, vec![replacement]);
+        drop(old_tables);
+
+        for path in old_paths {
+            match std::fs::remove_file(path) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        std::fs::File::open(&self.db_dir)?.sync_all()?;
         Ok(())
     }
 }

@@ -21,6 +21,9 @@ pub enum Error {
     #[error("sequence number exhausted")]
     SequenceExhausted,
 
+    #[error("table ID exhausted")]
+    TableIdExhausted,
+
     #[error("encoded record is too large")]
     RecordTooLarge,
 

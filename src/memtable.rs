@@ -45,7 +45,7 @@ impl Memtable {
         );
     }
 
-    fn apply(&mut self, key: Key, entry: Entry) {
+    pub(crate) fn apply(&mut self, key: Key, entry: Entry) {
         if self
             .entries
             .get(&key)
