@@ -1,4 +1,5 @@
-use crate::{codec::Decoder, data_block::EncodedDataBlock, Error, Key, Result};
+use super::data_block::EncodedDataBlock;
+use crate::{codec::Decoder, entry::Key, Error, Result};
 
 #[derive(Debug)]
 pub(crate) struct IndexEntry {

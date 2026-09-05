@@ -1,8 +1,8 @@
 use crate::{
     codec::Decoder,
+    entry::{Entry, Key, StoredValue},
     error::{Error, Result},
-    memtable::{Entry, Memtable, StoredValue},
-    Key,
+    memtable::Memtable,
 };
 
 const DATA_BLOCK_SIZE: usize = 4 * 1024;

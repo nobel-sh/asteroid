@@ -4,9 +4,10 @@ use std::{
 };
 
 use super::{
+    entry::{Key, Lookup, Value},
     error::{Error, Result},
-    memtable::{Key, Lookup, Memtable, Value},
-    table::{SSTable, TableLookup},
+    memtable::Memtable,
+    table::SSTable,
     wal::Wal,
     write::{WriteBatch, WriteOp},
 };
@@ -88,9 +89,9 @@ impl Db {
             Lookup::NotFound => {
                 for table in self.sstables.iter().rev() {
                     match table.lookup(key)? {
-                        TableLookup::Value(value) => return Ok(Some(value)),
-                        TableLookup::Deleted => return Ok(None),
-                        TableLookup::NotFound => {}
+                        Lookup::Value(value) => return Ok(Some(value)),
+                        Lookup::Deleted => return Ok(None),
+                        Lookup::NotFound => {}
                     }
                 }
                 Ok(None)

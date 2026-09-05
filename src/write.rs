@@ -1,4 +1,4 @@
-use super::memtable::{Key, Value};
+use super::entry::{Key, Value};
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum WriteOp {

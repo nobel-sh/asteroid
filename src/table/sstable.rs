@@ -1,9 +1,12 @@
 use super::{
-    codec::Decoder,
     data_block::{build_data_blocks, decode_data_block},
-    error::{Error, Result},
     index_block::IndexBlock,
-    memtable::{Key, Memtable, StoredValue, Value},
+};
+use crate::{
+    codec::Decoder,
+    entry::{Key, Lookup, StoredValue, Value},
+    error::{Error, Result},
+    memtable::Memtable,
 };
 
 use std::{
@@ -24,12 +27,6 @@ pub(crate) struct SSTable {
     file: File,
     index: IndexBlock,
     last_sequence: u64,
-}
-
-pub(crate) enum TableLookup {
-    Value(Value),
-    Deleted,
-    NotFound,
 }
 
 impl SSTable {
@@ -93,9 +90,9 @@ impl SSTable {
         })
     }
 
-    pub(crate) fn lookup(&self, key: &Key) -> Result<TableLookup> {
+    pub(crate) fn lookup(&self, key: &Key) -> Result<Lookup<Value>> {
         let Some((expected_last_key, block_offset, block_size)) = self.index.find_block(key) else {
-            return Ok(TableLookup::NotFound);
+            return Ok(Lookup::NotFound);
         };
         let block_size = usize::try_from(block_size).map_err(|_| Error::RecordTooLarge)?;
         let mut bytes = vec![0; block_size];
@@ -114,11 +111,11 @@ impl SSTable {
             .entries
             .binary_search_by(|(stored_key, _)| stored_key.cmp(key))
         else {
-            return Ok(TableLookup::NotFound);
+            return Ok(Lookup::NotFound);
         };
         match block.entries.swap_remove(position).1.value {
-            StoredValue::Data(value) => Ok(TableLookup::Value(value)),
-            StoredValue::Tombstone => Ok(TableLookup::Deleted),
+            StoredValue::Data(value) => Ok(Lookup::Value(value)),
+            StoredValue::Tombstone => Ok(Lookup::Deleted),
         }
     }
 
