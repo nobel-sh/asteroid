@@ -32,6 +32,9 @@ pub enum Error {
 
     #[error("corrupt SSTable: {0}")]
     CorruptSstable(String),
+
+    #[error("corrupt Manifest: {0}")]
+    CorruptManifest(String),
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

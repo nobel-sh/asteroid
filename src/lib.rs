@@ -2,6 +2,7 @@ mod codec;
 mod db;
 mod entry;
 mod error;
+mod manifest;
 mod memtable;
 mod table;
 mod wal;
