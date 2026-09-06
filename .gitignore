@@ -1,5 +1,7 @@
-target/
-*.wal
-*.sst
-wal.db
-*.sst.tmp
+*
+!/.gitignore
+!/Cargo.toml
+!/Cargo.lock
+!/src/
+!/src/**/
+!/src/**/*.rs
