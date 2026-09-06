@@ -4,7 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::entry::{Entry, StoredValue};
+use crate::{
+    entry::{Entry, StoredValue},
+    manifest::Manifest,
+};
 
 use super::{
     entry::{Key, Lookup, Value},
@@ -22,10 +25,9 @@ const COMPACTION_TRIGGER: usize = 2;
 pub struct Db {
     wal: Wal,
     memtable: Memtable,
-    last_sequence: u64,
+    manifest: Manifest,
     sstables: Vec<SSTable>,
     db_dir: PathBuf,
-    next_table_id: u32,
 }
 
 impl Db {
@@ -36,37 +38,50 @@ impl Db {
         let mut wal = Wal::open(wal_path)?;
         let records = wal.read_records()?;
 
-        let mut table_list = Vec::new();
-        for entry in std::fs::read_dir(&db_dir)? {
-            let table_path = entry?.path();
-            if table_path.extension() != Some(OsStr::new("sst")) {
-                continue;
-            }
+        let mut discovered = discover_sstables(&db_dir)?;
 
-            let id: u32 = table_path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .and_then(|stem| stem.parse().ok())
-                .ok_or_else(|| Error::CorruptSstable("Invalid SSTable filename".into()))?;
-            let file_path = Path::new(table_path.as_path());
-            let table = SSTable::open(file_path, id)?;
-            table_list.push(table);
-        }
-        table_list.sort_by_key(SSTable::id);
-        let next_table_id = table_list.last().map_or(1, |table| table.id() + 1);
-        let last_sequence = table_list
-            .iter()
-            .map(SSTable::last_sequence)
-            .max()
-            .unwrap_or(0);
+        let (manifest, table_list) = match Manifest::load(&db_dir)? {
+            Some(manifest) => {
+                let mut tables = Vec::new();
+                for id in &manifest.table_ids {
+                    let path = discovered.remove(id).ok_or_else(|| {
+                        Error::CorruptManifest(format!("live SSTable {id} is missing"))
+                    })?;
+                    tables.push(SSTable::open(&path, *id)?);
+                }
+
+                let had_orphans = !discovered.is_empty();
+                for path in discovered.into_values() {
+                    std::fs::remove_file(path)?;
+                }
+                if had_orphans {
+                    std::fs::File::open(&db_dir)?.sync_all()?;
+                }
+                (manifest, tables)
+            }
+            None => {
+                if !discovered.is_empty() {
+                    return Err(Error::CorruptManifest(
+                        "SSTables exist but MANIFEST is missing".into(),
+                    ));
+                }
+
+                let manifest = Manifest {
+                    last_sequence: 0,
+                    next_table_id: 1,
+                    table_ids: Vec::new(),
+                };
+                manifest.store(&db_dir)?;
+                (manifest, Vec::new())
+            }
+        };
 
         let mut db = Self {
             wal,
             memtable: Memtable::default(),
-            last_sequence,
+            manifest,
             sstables: table_list,
             db_dir,
-            next_table_id,
         };
 
         for record in records {
@@ -81,7 +96,7 @@ impl Db {
                 .ok_or(Error::SequenceExhausted)?;
             db.memtable
                 .apply_batch(&record.batch, record.first_sequence);
-            db.last_sequence = db.last_sequence.max(last_sequence);
+            db.manifest.last_sequence = db.manifest.last_sequence.max(last_sequence);
         }
         Ok(db)
     }
@@ -127,16 +142,18 @@ impl Db {
         let operation_count =
             u64::try_from(batch.operations.len()).map_err(|_| Error::SequenceExhausted)?;
         let first_sequence = self
+            .manifest
             .last_sequence
             .checked_add(1)
             .ok_or(Error::SequenceExhausted)?;
         let final_sequence = self
+            .manifest
             .last_sequence
             .checked_add(operation_count)
             .ok_or(Error::SequenceExhausted)?;
 
         self.wal.append(first_sequence, &batch)?;
-        let mut sequence = self.last_sequence;
+        let mut sequence = self.manifest.last_sequence;
         for operation in batch.operations {
             sequence += 1;
             match operation {
@@ -144,7 +161,7 @@ impl Db {
                 WriteOp::Delete { key } => self.memtable.delete(sequence, key),
             }
         }
-        self.last_sequence = final_sequence;
+        self.manifest.last_sequence = final_sequence;
 
         if self.memtable_limit_exceeded() {
             self.flush_memtable()?;
@@ -154,7 +171,7 @@ impl Db {
     }
 
     pub fn last_sequence(&self) -> u64 {
-        self.last_sequence
+        self.manifest.last_sequence
     }
 
     fn flush_memtable(&mut self) -> Result<()> {
@@ -162,17 +179,16 @@ impl Db {
             return Ok(());
         }
 
-        let table = SSTable::create(
-            &self.db_dir,
-            self.next_table_id,
-            &self.memtable,
-            self.last_sequence,
-        )?;
+        let table_id = self.manifest.next_table_id;
+        let next_table_id = table_id.checked_add(1).ok_or(Error::TableIdExhausted)?;
+        let table = SSTable::create(&self.db_dir, table_id, &self.memtable)?;
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.table_ids.push(table_id);
+        next_manifest.next_table_id = next_table_id;
+        next_manifest.store(&self.db_dir)?;
+
         self.sstables.push(table);
-        self.next_table_id = self
-            .next_table_id
-            .checked_add(1)
-            .ok_or(Error::TableIdExhausted)?;
+        self.manifest = next_manifest;
         self.wal.reset()?;
         self.memtable.clear();
         if self.sstables.len() >= COMPACTION_TRIGGER {
@@ -185,13 +201,6 @@ impl Db {
         if self.sstables.len() < 2 {
             return Ok(());
         }
-
-        let last_sequence = self
-            .sstables
-            .iter()
-            .map(SSTable::last_sequence)
-            .max()
-            .unwrap_or(0);
 
         let mut merged: BTreeMap<Key, Entry> = BTreeMap::new();
         for table in &self.sstables {
@@ -211,12 +220,15 @@ impl Db {
             compacted.apply(key, entry);
         }
 
-        let replacement =
-            SSTable::create(&self.db_dir, self.next_table_id, &compacted, last_sequence)?;
-        self.next_table_id = self
-            .next_table_id
+        let replacement_id = self.manifest.next_table_id;
+        let next_table_id = replacement_id
             .checked_add(1)
             .ok_or(Error::TableIdExhausted)?;
+        let replacement = SSTable::create(&self.db_dir, replacement_id, &compacted)?;
+        let mut next_manifest = self.manifest.clone();
+        next_manifest.table_ids = vec![replacement_id];
+        next_manifest.next_table_id = next_table_id;
+        next_manifest.store(&self.db_dir)?;
 
         let old_paths: Vec<_> = self
             .sstables
@@ -224,6 +236,7 @@ impl Db {
             .map(|table| table.path(&self.db_dir))
             .collect();
         let old_tables = std::mem::replace(&mut self.sstables, vec![replacement]);
+        self.manifest = next_manifest;
         drop(old_tables);
 
         for path in old_paths {
@@ -238,6 +251,23 @@ impl Db {
     }
 }
 
+fn discover_sstables(directory: &Path) -> Result<BTreeMap<u32, PathBuf>> {
+    let mut tables = BTreeMap::new();
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.extension() != Some(OsStr::new("sst")) {
+            continue;
+        }
+        let id = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse().ok())
+            .ok_or_else(|| Error::CorruptSstable("invalid SSTable filename".into()))?;
+        tables.insert(id, path);
+    }
+    Ok(tables)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -246,7 +276,7 @@ mod tests {
     };
 
     use super::Db;
-    use crate::{Key, WriteBatch};
+    use crate::{Error, Key, WriteBatch};
 
     fn path() -> std::path::PathBuf {
         let unique = SystemTime::now()
@@ -294,6 +324,20 @@ mod tests {
         assert_eq!(db.last_sequence(), 9);
 
         drop(db);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_sstables_without_manifest() {
+        let path = path();
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("1.sst"), []).unwrap();
+
+        assert!(matches!(
+            Db::open(path.clone()),
+            Err(Error::CorruptManifest(_))
+        ));
+
         fs::remove_dir_all(path).unwrap();
     }
 }

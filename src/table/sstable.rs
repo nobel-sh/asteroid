@@ -19,28 +19,19 @@ use std::{
 const MAGIC_BYTES: [u8; 4] = *b"SST1";
 const VERSION: u16 = 1;
 const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>();
-const FOOTER_SIZE: usize = size_of::<u64>() + size_of::<u32>() + size_of::<u64>();
+const FOOTER_SIZE: usize = size_of::<u64>() + size_of::<u32>();
 
 #[derive(Debug)]
 pub(crate) struct SSTable {
     id: u32,
     file: File,
     index: IndexBlock,
-    last_sequence: u64,
 }
 
 impl SSTable {
-    pub(crate) fn id(&self) -> u32 {
-        self.id
-    }
-
     pub(crate) fn path(&self, directory: &Path) -> PathBuf {
         let table_file = format!("{:08}.sst", self.id);
         directory.join(table_file)
-    }
-
-    pub(crate) fn last_sequence(&self) -> u64 {
-        self.last_sequence
     }
 
     pub(crate) fn read_all_entries(&self) -> Result<Vec<(Key, Entry)>> {
@@ -56,12 +47,7 @@ impl SSTable {
         Ok(entries)
     }
 
-    pub(crate) fn create(
-        directory: &Path,
-        id: u32,
-        memtable: &Memtable,
-        last_sequence: u64,
-    ) -> Result<Self> {
+    pub(crate) fn create(directory: &Path, id: u32, memtable: &Memtable) -> Result<Self> {
         let mut buffer = Vec::new();
 
         buffer.extend_from_slice(&MAGIC_BYTES);
@@ -80,7 +66,6 @@ impl SSTable {
 
         buffer.extend_from_slice(&index_offset.to_be_bytes());
         buffer.extend_from_slice(&index_size.to_be_bytes());
-        buffer.extend_from_slice(&last_sequence.to_be_bytes());
 
         let file_name = format!("{:08}.sst", id);
         let tmp_file_name = format!("{}.tmp", file_name);
@@ -99,12 +84,7 @@ impl SSTable {
 
         let file = OpenOptions::new().read(true).open(new_file)?;
 
-        Ok(Self {
-            id,
-            file,
-            index,
-            last_sequence,
-        })
+        Ok(Self { id, file, index })
     }
 
     pub(crate) fn lookup(&self, key: &Key) -> Result<Lookup<Value>> {
@@ -138,18 +118,13 @@ impl SSTable {
 
     pub(crate) fn open(path: &Path, id: u32) -> Result<Self> {
         let file = OpenOptions::new().read(true).open(path)?;
-        let (index, last_sequence) = read_and_validate_metadata(&file)?;
+        let index = read_and_validate_metadata(&file)?;
 
-        Ok(Self {
-            id,
-            file,
-            last_sequence,
-            index,
-        })
+        Ok(Self { id, file, index })
     }
 }
 
-fn read_and_validate_metadata(file: &File) -> Result<(IndexBlock, u64)> {
+fn read_and_validate_metadata(file: &File) -> Result<IndexBlock> {
     let file_size = file.metadata()?.len();
     let footer_offset = file_size
         .checked_sub(FOOTER_SIZE as u64)
@@ -171,7 +146,6 @@ fn read_and_validate_metadata(file: &File) -> Result<(IndexBlock, u64)> {
     let mut footer = Decoder::new(&footer_bytes);
     let index_offset = footer.read_u64()?;
     let index_size = footer.read_u32()?;
-    let last_sequence = footer.read_u64()?;
     footer.finish()?;
     if index_offset < HEADER_SIZE as u64
         || index_offset.checked_add(u64::from(index_size)) != Some(footer_offset)
@@ -183,7 +157,7 @@ fn read_and_validate_metadata(file: &File) -> Result<(IndexBlock, u64)> {
     file.read_exact_at(&mut index_bytes, index_offset)?;
     let index = IndexBlock::decode_index_block(&index_bytes)?;
     index.validate_block_handles(HEADER_SIZE as u64, index_offset)?;
-    Ok((index, last_sequence))
+    Ok(index)
 }
 
 fn corrupt(message: impl Into<String>) -> Error {

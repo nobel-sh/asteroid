@@ -5,9 +5,10 @@ use std::{
     path::Path,
 };
 
-const MAGIC_BYTES: [u8; 4] = *b"MAN1";
+const MAGIC_BYTES: [u8; 4] = *b"MNFT";
 const VERSION: u16 = 1;
 
+#[derive(Clone, Debug)]
 pub(crate) struct Manifest {
     pub(crate) last_sequence: u64,
     pub(crate) next_table_id: u32,
