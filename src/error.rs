@@ -35,6 +35,9 @@ pub enum Error {
 
     #[error("corrupt Manifest: {0}")]
     CorruptManifest(String),
+
+    #[error("database is already in use by another instance")]
+    DbLocked,
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

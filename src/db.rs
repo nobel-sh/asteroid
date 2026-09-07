@@ -1,6 +1,7 @@
 use std::{
     collections::BTreeMap,
     ffi::OsStr,
+    fs::{File, OpenOptions, TryLockError},
     path::{Path, PathBuf},
 };
 
@@ -28,12 +29,26 @@ pub struct Db {
     manifest: Manifest,
     sstables: Vec<SSTable>,
     db_dir: PathBuf,
+    _lockfile: File,
 }
 
 impl Db {
     pub fn open(db_dir: PathBuf) -> Result<Self> {
         std::fs::DirBuilder::new().recursive(true).create(&db_dir)?;
         let wal_path = Path::new(&db_dir).join("wal.db");
+        let lockfile_path = Path::new(&db_dir).join("LOCKFILE");
+        let _lockfile = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lockfile_path)?;
+
+        match _lockfile.try_lock() {
+            Err(TryLockError::WouldBlock) => return Err(Error::DbLocked),
+            Err(TryLockError::Error(e)) => return Err(e.into()),
+            Ok(()) => {}
+        };
 
         let mut wal = Wal::open(wal_path)?;
         let records = wal.read_records()?;
@@ -82,6 +97,7 @@ impl Db {
             manifest,
             sstables: table_list,
             db_dir,
+            _lockfile,
         };
 
         for record in records {
