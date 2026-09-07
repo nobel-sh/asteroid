@@ -1,31 +1,30 @@
 use super::{
-    data_block::{build_data_blocks, decode_data_block},
-    index_block::IndexBlock,
+    builder::SSTableBuilder, data_block::decode_data_block, index_block::IndexBlock,
+    iter::TableIterator,
 };
 use crate::{
     codec::Decoder,
-    entry::{Entry, Key, Lookup, StoredValue, Value},
+    entry::{Key, Lookup, StoredValue, Value},
     error::{Error, Result},
     memtable::Memtable,
 };
 
 use std::{
     fs::{File, OpenOptions},
-    io::Write,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
 };
 
-const MAGIC_BYTES: [u8; 4] = *b"SST1";
-const VERSION: u16 = 1;
+pub(super) const MAGIC_BYTES: [u8; 4] = *b"SST1";
+pub(super) const VERSION: u16 = 1;
 const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>();
 const FOOTER_SIZE: usize = size_of::<u64>() + size_of::<u32>();
 
 #[derive(Debug)]
 pub(crate) struct SSTable {
-    id: u32,
-    file: File,
-    index: IndexBlock,
+    pub(super) id: u32,
+    pub(super) file: File,
+    pub(super) index: IndexBlock,
 }
 
 impl SSTable {
@@ -34,57 +33,16 @@ impl SSTable {
         directory.join(table_file)
     }
 
-    pub(crate) fn read_all_entries(&self) -> Result<Vec<(Key, Entry)>> {
-        let mut entries = Vec::new();
-        for index in &self.index.entries {
-            let block_size =
-                usize::try_from(index.block_size).map_err(|_| Error::RecordTooLarge)?;
-            let mut buffer = vec![0; block_size];
-            self.file.read_exact_at(&mut buffer, index.block_offset)?;
-            let data_block = decode_data_block(&buffer)?;
-            entries.extend(data_block.entries);
-        }
-        Ok(entries)
+    pub(crate) fn iter(&self) -> TableIterator<'_> {
+        TableIterator::new(self)
     }
 
     pub(crate) fn create(directory: &Path, id: u32, memtable: &Memtable) -> Result<Self> {
-        let mut buffer = Vec::new();
-
-        buffer.extend_from_slice(&MAGIC_BYTES);
-        buffer.extend_from_slice(&VERSION.to_be_bytes());
-
-        let blocks = build_data_blocks(memtable)?;
-        let index = IndexBlock::from_data_blocks(&blocks, HEADER_SIZE as u64)?;
-        for block in &blocks {
-            buffer.extend_from_slice(&block.bytes);
+        let mut builder = SSTableBuilder::new(directory, id)?;
+        for (key, entry) in memtable.iter() {
+            builder.add(key, entry)?;
         }
-
-        let index_offset = u64::try_from(buffer.len()).map_err(|_| Error::RecordTooLarge)?;
-        let index_bytes = index.as_bytes()?;
-        let index_size = u32::try_from(index_bytes.len()).map_err(|_| Error::RecordTooLarge)?;
-        buffer.extend_from_slice(&index_bytes);
-
-        buffer.extend_from_slice(&index_offset.to_be_bytes());
-        buffer.extend_from_slice(&index_size.to_be_bytes());
-
-        let file_name = format!("{:08}.sst", id);
-        let tmp_file_name = format!("{}.tmp", file_name);
-        let path = directory.join(tmp_file_name);
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&path)?;
-        file.write_all(&buffer)?;
-        file.sync_all()?;
-
-        let new_file = directory.join(file_name);
-        std::fs::rename(path, &new_file)?;
-        std::fs::File::open(directory)?.sync_all()?;
-
-        let file = OpenOptions::new().read(true).open(new_file)?;
-
-        Ok(Self { id, file, index })
+        builder.finish()
     }
 
     pub(crate) fn lookup(&self, key: &Key) -> Result<Lookup<Value>> {

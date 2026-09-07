@@ -14,7 +14,7 @@ use super::{
     entry::{Key, Lookup, Value},
     error::{Error, Result},
     memtable::Memtable,
-    table::SSTable,
+    table::{SSTable, SSTableBuilder},
     wal::Wal,
     write::{WriteBatch, WriteOp},
 };
@@ -218,29 +218,51 @@ impl Db {
             return Ok(());
         }
 
-        let mut merged: BTreeMap<Key, Entry> = BTreeMap::new();
-        for table in &self.sstables {
-            for (key, entry) in table.read_all_entries()? {
-                if merged
-                    .get(&key)
-                    .is_none_or(|current| entry.sequence > current.sequence)
-                {
-                    merged.insert(key, entry);
-                }
-            }
-        }
-
-        merged.retain(|_, entry| !matches!(entry.value, StoredValue::Tombstone));
-        let mut compacted = Memtable::default();
-        for (key, entry) in merged {
-            compacted.apply(key, entry);
-        }
-
         let replacement_id = self.manifest.next_table_id;
         let next_table_id = replacement_id
             .checked_add(1)
             .ok_or(Error::TableIdExhausted)?;
-        let replacement = SSTable::create(&self.db_dir, replacement_id, &compacted)?;
+
+        let mut iterators: Vec<_> = self.sstables.iter().map(SSTable::iter).collect();
+        let mut heads = Vec::new();
+        for iter in &mut iterators {
+            heads.push(iter.next().transpose()?);
+        }
+        let mut builder = SSTableBuilder::new(&self.db_dir, replacement_id)?;
+
+        loop {
+            // choose the smallest key and only keep its newest
+            let mut winner: Option<(&Key, &Entry)> = None;
+            for (key, entry) in heads.iter().flatten() {
+                if let Some((best_key, best_entry)) = winner {
+                    if key > best_key {
+                        continue;
+                    }
+                    if key == best_key && entry.sequence <= best_entry.sequence {
+                        continue;
+                    }
+                }
+                winner = Some((key, entry));
+            }
+
+            let Some((key, entry)) = winner else {
+                break; // every head is exhausted.
+            };
+
+            if !matches!(entry.value, StoredValue::Tombstone) {
+                builder.add(key, entry)?;
+            }
+
+            let consumed_key = key.clone();
+            for (head, iter) in heads.iter_mut().zip(&mut iterators) {
+                if head.as_ref().is_some_and(|(key, _)| key == &consumed_key) {
+                    *head = iter.next().transpose()?;
+                }
+            }
+        }
+
+        drop(iterators);
+        let replacement = builder.finish()?;
         let mut next_manifest = self.manifest.clone();
         next_manifest.table_ids = vec![replacement_id];
         next_manifest.next_table_id = next_table_id;
@@ -310,7 +332,7 @@ mod tests {
         let mut first = WriteBatch::new();
         first.put("a", "old");
         first.put("b", "value");
-        first.put("c", "value");
+        first.put("c", vec![0_u8; 4096]);
         first.put("d", "value");
         db.write(first).unwrap();
 
@@ -320,12 +342,27 @@ mod tests {
         second.put("e", "value");
         second.put("f", "value");
         db.write(second).unwrap();
+        assert_eq!(db.sstables.len(), 1);
+        let entries = db.sstables[0]
+            .iter()
+            .collect::<crate::Result<Vec<_>>>()
+            .unwrap();
+        assert_eq!(
+            entries
+                .iter()
+                .map(|(key, _)| key.clone())
+                .collect::<Vec<_>>(),
+            ["a", "c", "d", "e", "f"].map(Key::from)
+        );
         drop(db);
 
         let mut db = Db::open(path.clone()).unwrap();
         assert_eq!(db.get(&Key::from("a")).unwrap(), Some("new".into()));
         assert_eq!(db.get(&Key::from("b")).unwrap(), None);
-        assert_eq!(db.get(&Key::from("c")).unwrap(), Some("value".into()));
+        assert_eq!(
+            db.get(&Key::from("c")).unwrap(),
+            Some(vec![0_u8; 4096].into())
+        );
         assert_eq!(db.get(&Key::from("e")).unwrap(), Some("value".into()));
         assert_eq!(db.last_sequence(), 8);
 

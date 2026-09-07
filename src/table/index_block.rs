@@ -9,7 +9,7 @@ pub(crate) struct IndexEntry {
 }
 
 impl IndexEntry {
-    fn from_data_block(block: &EncodedDataBlock, block_offset: u64) -> Result<Self> {
+    pub fn from_data_block(block: &EncodedDataBlock, block_offset: u64) -> Result<Self> {
         let block_size = u32::try_from(block.bytes.len()).map_err(|_| Error::RecordTooLarge)?;
         Ok(Self {
             last_key: block.last_key.clone(),
@@ -40,22 +40,6 @@ impl IndexBlock {
         let hash = crc32fast::hash(&index_buffer);
         index_buffer.extend_from_slice(&hash.to_be_bytes());
         Ok(index_buffer)
-    }
-
-    pub(crate) fn from_data_blocks(
-        data_blocks: &[EncodedDataBlock],
-        starting_offset: u64,
-    ) -> Result<Self> {
-        let mut entries = Vec::new();
-        let mut offset = starting_offset;
-        for block in data_blocks {
-            let index_entry = IndexEntry::from_data_block(block, offset)?;
-            offset = offset
-                .checked_add(u64::from(index_entry.block_size))
-                .ok_or(Error::RecordTooLarge)?;
-            entries.push(index_entry);
-        }
-        Ok(Self { entries })
     }
 
     pub(crate) fn decode_index_block(bytes: &[u8]) -> Result<IndexBlock> {

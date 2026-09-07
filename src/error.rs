@@ -27,6 +27,9 @@ pub enum Error {
     #[error("encoded record is too large")]
     RecordTooLarge,
 
+    #[error("SSTable keys must be added in strictly increasing order")]
+    InvalidKeyOrder,
+
     #[error("corrupt WAL: {0}")]
     CorruptWal(String),
 

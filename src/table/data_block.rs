@@ -2,7 +2,6 @@ use crate::{
     codec::Decoder,
     entry::{Entry, Key, StoredValue},
     error::{Error, Result},
-    memtable::Memtable,
 };
 
 const DATA_BLOCK_SIZE: usize = 4 * 1024;
@@ -43,8 +42,8 @@ impl DataBlockBuilder {
         Ok(())
     }
 
-    pub(crate) fn finish(self) -> Option<EncodedDataBlock> {
-        let last_key = self.last_key?;
+    pub(crate) fn finish(&self) -> Option<EncodedDataBlock> {
+        let last_key = self.last_key.clone()?;
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.entry_count.to_be_bytes());
         bytes.extend_from_slice(&self.buffer);
@@ -83,26 +82,6 @@ pub(crate) fn encode_entry(key: &Key, entry: &Entry, buffer: &mut Vec<u8>) -> Re
     buffer.extend_from_slice(key_bytes);
     buffer.extend_from_slice(value_bytes);
     Ok(())
-}
-
-pub(crate) fn build_data_blocks(memtable: &Memtable) -> Result<Vec<EncodedDataBlock>> {
-    let mut blocks = Vec::new();
-    let mut builder = DataBlockBuilder::new();
-    for (key, entry) in memtable.iter() {
-        let entry_size = encoded_entry_size(key, entry)?;
-        if builder.would_exceed(entry_size) && !builder.is_empty() {
-            if let Some(block) = builder.finish() {
-                blocks.push(block);
-            }
-            builder = DataBlockBuilder::new();
-        }
-        builder.add_entry(key, entry)?;
-    }
-
-    if let Some(block) = builder.finish() {
-        blocks.push(block);
-    }
-    Ok(blocks)
 }
 
 pub(crate) fn encoded_entry_size(key: &Key, entry: &Entry) -> Result<usize> {
@@ -171,21 +150,20 @@ fn corrupt(message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_data_blocks, decode_data_block};
+    use super::{decode_data_block, DataBlockBuilder};
     use crate::{memtable::Memtable, Key, Value};
 
     #[test]
-    fn splits_and_frames_sorted_entries() {
+    fn frames_sorted_entries() {
         let mut memtable = Memtable::default();
         memtable.put(1, Key::from("a"), Value::from(vec![0; 4096]));
         memtable.put(2, Key::from("b"), Value::from("value"));
 
-        let blocks = build_data_blocks(&memtable).unwrap();
-
-        assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].last_key, Key::from("a"));
-        assert_eq!(blocks[1].last_key, Key::from("b"));
-        for block in &blocks {
+        for (key, entry) in memtable.iter() {
+            let mut builder = DataBlockBuilder::new();
+            builder.add_entry(key, entry).unwrap();
+            let block = builder.finish().unwrap();
+            assert_eq!(&block.last_key, key);
             let checksum_at = block.bytes.len() - 4;
             assert_eq!(
                 u32::from_be_bytes(block.bytes[checksum_at..].try_into().unwrap()),
