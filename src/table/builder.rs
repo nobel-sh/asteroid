@@ -10,7 +10,7 @@ use super::SSTable;
 use crate::{
     entry::Entry,
     table::{
-        data_block::{encoded_entry_size, EncodedDataBlock},
+        data_block::EncodedDataBlock,
         index_block::{IndexBlock, IndexEntry},
     },
     Error, Key, Result,
@@ -65,7 +65,7 @@ impl SSTableBuilder {
         {
             return Err(Error::InvalidKeyOrder);
         }
-        let entry_size = encoded_entry_size(key, entry)?;
+        let entry_size = entry.encoded_size(key)?;
         if self.block_builder.would_exceed(entry_size) && !self.block_builder.is_empty() {
             if let Some(block) = self.block_builder.finish() {
                 self.flush_block(&block)?;

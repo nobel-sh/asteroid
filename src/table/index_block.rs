@@ -1,5 +1,9 @@
 use super::data_block::EncodedDataBlock;
-use crate::{codec::Decoder, entry::Key, Error, Result};
+use crate::{
+    codec::{Decoder, CHECKSUM_SIZE},
+    entry::Key,
+    Error, Result,
+};
 
 #[derive(Debug)]
 pub(crate) struct IndexEntry {
@@ -45,7 +49,7 @@ impl IndexBlock {
     pub(crate) fn decode_index_block(bytes: &[u8]) -> Result<IndexBlock> {
         let checksum_offset = bytes
             .len()
-            .checked_sub(4)
+            .checked_sub(CHECKSUM_SIZE)
             .ok_or_else(|| corrupt("truncated index block checksum"))?;
         let (contents, checksum_bytes) = bytes.split_at(checksum_offset);
         let stored_checksum = u32::from_be_bytes(checksum_bytes.try_into().unwrap());

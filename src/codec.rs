@@ -1,5 +1,7 @@
 use crate::error::DecodeError;
 
+pub(crate) const CHECKSUM_SIZE: usize = size_of::<u32>();
+
 type DecoderResult<T> = std::result::Result<T, DecodeError>;
 
 pub(crate) struct Decoder<'a> {
@@ -30,20 +32,20 @@ impl<'a> Decoder<'a> {
     }
 
     pub(crate) fn read_u16(&mut self) -> DecoderResult<u16> {
-        let mut bytes = [0; 2];
-        bytes.copy_from_slice(self.take(2)?);
+        let mut bytes = [0; size_of::<u16>()];
+        bytes.copy_from_slice(self.take(size_of::<u16>())?);
         Ok(u16::from_be_bytes(bytes))
     }
 
     pub(crate) fn read_u32(&mut self) -> DecoderResult<u32> {
-        let mut bytes = [0; 4];
-        bytes.copy_from_slice(self.take(4)?);
+        let mut bytes = [0; size_of::<u32>()];
+        bytes.copy_from_slice(self.take(size_of::<u32>())?);
         Ok(u32::from_be_bytes(bytes))
     }
 
     pub(crate) fn read_u64(&mut self) -> DecoderResult<u64> {
-        let mut bytes = [0; 8];
-        bytes.copy_from_slice(self.take(8)?);
+        let mut bytes = [0; size_of::<u64>()];
+        bytes.copy_from_slice(self.take(size_of::<u64>())?);
         Ok(u64::from_be_bytes(bytes))
     }
 

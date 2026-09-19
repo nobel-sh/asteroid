@@ -1,10 +1,11 @@
 use crate::{
-    codec::Decoder,
+    codec::{Decoder, CHECKSUM_SIZE},
     entry::{Entry, Key, StoredValue},
     error::{Error, Result},
 };
 
 const DATA_BLOCK_SIZE: usize = 4 * 1024;
+const BLOCK_OVERHEAD: usize = size_of::<u32>() + CHECKSUM_SIZE;
 pub(crate) const DELETE: u8 = 1;
 pub(crate) const PUT: u8 = 2;
 
@@ -57,7 +58,7 @@ impl DataBlockBuilder {
         self.buffer
             .len()
             .saturating_add(entry_size)
-            .saturating_add(8)
+            .saturating_add(BLOCK_OVERHEAD)
             > DATA_BLOCK_SIZE
     }
 
@@ -82,17 +83,6 @@ pub(crate) fn encode_entry(key: &Key, entry: &Entry, buffer: &mut Vec<u8>) -> Re
     buffer.extend_from_slice(key_bytes);
     buffer.extend_from_slice(value_bytes);
     Ok(())
-}
-
-pub(crate) fn encoded_entry_size(key: &Key, entry: &Entry) -> Result<usize> {
-    let value_size = match &entry.value {
-        StoredValue::Data(data) => data.as_bytes().len(),
-        StoredValue::Tombstone => 0,
-    };
-    17_usize
-        .checked_add(key.as_bytes().len())
-        .and_then(|size| size.checked_add(value_size))
-        .ok_or(Error::RecordTooLarge)
 }
 
 pub(crate) fn decode_data_block(bytes: &[u8]) -> Result<DataBlock> {
@@ -150,7 +140,7 @@ fn corrupt(message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_data_block, DataBlockBuilder};
+    use super::{decode_data_block, DataBlockBuilder, CHECKSUM_SIZE};
     use crate::{memtable::Memtable, Key, Value};
 
     #[test]
@@ -164,7 +154,7 @@ mod tests {
             builder.add_entry(key, entry).unwrap();
             let block = builder.finish().unwrap();
             assert_eq!(&block.last_key, key);
-            let checksum_at = block.bytes.len() - 4;
+            let checksum_at = block.bytes.len() - CHECKSUM_SIZE;
             assert_eq!(
                 u32::from_be_bytes(block.bytes[checksum_at..].try_into().unwrap()),
                 crc32fast::hash(&block.bytes[..checksum_at])

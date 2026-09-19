@@ -19,7 +19,7 @@ use super::{
     write::{WriteBatch, WriteOp},
 };
 
-const MEMTABLE_LIMIT: usize = 4;
+const WAL_SIZE_LIMIT: u64 = 4 * 1024;
 const COMPACTION_TRIGGER: usize = 2;
 
 #[derive(Debug)]
@@ -111,7 +111,7 @@ impl Db {
                 .checked_add(operation_count - 1)
                 .ok_or(Error::SequenceExhausted)?;
             db.memtable
-                .apply_batch(&record.batch, record.first_sequence);
+                .apply_batch(&record.batch, record.first_sequence)?;
             db.manifest.last_sequence = db.manifest.last_sequence.max(last_sequence);
         }
         Ok(db)
@@ -138,10 +138,6 @@ impl Db {
         let mut batch = WriteBatch::new();
         batch.put(key, value);
         self.write(batch)
-    }
-
-    fn memtable_limit_exceeded(&self) -> bool {
-        self.memtable.entry_count() >= MEMTABLE_LIMIT
     }
 
     pub fn delete(&mut self, key: impl Into<Key>) -> Result<()> {
@@ -179,7 +175,7 @@ impl Db {
         }
         self.manifest.last_sequence = final_sequence;
 
-        if self.memtable_limit_exceeded() {
+        if self.wal.size()? >= WAL_SIZE_LIMIT {
             self.flush_memtable()?;
         }
 
@@ -339,7 +335,7 @@ mod tests {
         let mut second = WriteBatch::new();
         second.put("a", "new");
         second.delete("b");
-        second.put("e", "value");
+        second.put("e", vec![1_u8; 4096]);
         second.put("f", "value");
         db.write(second).unwrap();
         assert_eq!(db.sstables.len(), 1);
@@ -363,7 +359,10 @@ mod tests {
             db.get(&Key::from("c")).unwrap(),
             Some(vec![0_u8; 4096].into())
         );
-        assert_eq!(db.get(&Key::from("e")).unwrap(), Some("value".into()));
+        assert_eq!(
+            db.get(&Key::from("e")).unwrap(),
+            Some(vec![1_u8; 4096].into())
+        );
         assert_eq!(db.last_sequence(), 8);
 
         db.put("wal-only", "value").unwrap();

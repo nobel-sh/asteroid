@@ -1,6 +1,6 @@
 use crate::{
     entry::{Entry, Key, Lookup, StoredValue, Value},
-    WriteBatch, WriteOp,
+    Error, Result, WriteBatch, WriteOp,
 };
 use std::collections::BTreeMap;
 
@@ -32,7 +32,7 @@ impl Memtable {
                 sequence,
                 value: StoredValue::Data(value),
             },
-        );
+        )
     }
 
     pub(crate) fn delete(&mut self, sequence: u64, key: Key) {
@@ -42,7 +42,7 @@ impl Memtable {
                 sequence,
                 value: StoredValue::Tombstone,
             },
-        );
+        )
     }
 
     pub(crate) fn apply(&mut self, key: Key, entry: Entry) {
@@ -55,22 +55,21 @@ impl Memtable {
         }
     }
 
-    pub(crate) fn apply_batch(&mut self, batch: &WriteBatch, starting_sequence: u64) {
+    pub(crate) fn apply_batch(&mut self, batch: &WriteBatch, starting_sequence: u64) -> Result<()> {
         for (offset, operation) in (0_u64..).zip(&batch.operations) {
-            let sequence = offset + starting_sequence;
+            let sequence = starting_sequence
+                .checked_add(offset)
+                .ok_or(Error::SequenceExhausted)?;
             match operation {
                 WriteOp::Delete { key } => self.delete(sequence, key.clone()),
                 WriteOp::Put { key, value } => self.put(sequence, key.clone(), value.clone()),
             }
         }
+        Ok(())
     }
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Key, &Entry)> {
         self.entries.iter()
-    }
-
-    pub(crate) fn entry_count(&self) -> usize {
-        self.entries.len()
     }
 
     pub(crate) fn is_empty(&self) -> bool {

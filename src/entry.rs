@@ -1,3 +1,8 @@
+use crate::{Error, Result};
+
+// Sequence, operation kind, key length, and value length.
+const ENTRY_HEADER_SIZE: usize = size_of::<u64>() + size_of::<u8>() + 2 * size_of::<u32>();
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct Key(Vec<u8>);
 
@@ -62,6 +67,19 @@ pub(crate) enum StoredValue {
 pub(crate) struct Entry {
     pub(crate) sequence: u64,
     pub(crate) value: StoredValue,
+}
+
+impl Entry {
+    pub(crate) fn encoded_size(&self, key: &Key) -> Result<usize> {
+        let value_size = match &self.value {
+            StoredValue::Data(value) => value.as_bytes().len(),
+            StoredValue::Tombstone => 0,
+        };
+        ENTRY_HEADER_SIZE
+            .checked_add(key.as_bytes().len())
+            .and_then(|size| size.checked_add(value_size))
+            .ok_or(Error::RecordTooLarge)
+    }
 }
 
 #[derive(Debug, Eq, PartialEq)]
