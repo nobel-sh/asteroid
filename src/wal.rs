@@ -25,7 +25,8 @@ use std::{
 use crate::{
     codec::Decoder,
     error::{Error, Result},
-    Key, Value, WriteBatch, WriteOp,
+    write::WriteOp,
+    Key, Value, WriteBatch,
 };
 
 const DELETE: u8 = 1;

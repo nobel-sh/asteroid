@@ -8,7 +8,7 @@ mod table;
 mod wal;
 mod write;
 
-pub use db::Db;
+pub use db::{Db, Options};
 pub use entry::{Key, Value};
 pub use error::{DecodeError, Error, Result};
-pub use write::{WriteBatch, WriteOp};
+pub use write::WriteBatch;

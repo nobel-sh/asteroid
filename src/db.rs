@@ -19,8 +19,22 @@ use super::{
     write::{WriteBatch, WriteOp},
 };
 
-const WAL_SIZE_LIMIT: u64 = 4 * 1024;
-const COMPACTION_TRIGGER: usize = 2;
+#[derive(Clone, Debug)]
+pub struct Options {
+    /// Flush after a write brings the WAL to at least this many bytes. Must be positive.
+    pub wal_size_limit: u64,
+    /// Compact after a flush leaves at least this many SSTables. Must be at least two.
+    pub compaction_trigger: usize,
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            wal_size_limit: 4 * 1024 * 1024,
+            compaction_trigger: 4,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Db {
@@ -30,10 +44,23 @@ pub struct Db {
     sstables: Vec<SSTable>,
     db_dir: PathBuf,
     _lockfile: File,
+    options: Options,
 }
 
 impl Db {
     pub fn open(db_dir: PathBuf) -> Result<Self> {
+        Self::open_with_options(db_dir, Options::default())
+    }
+
+    pub fn open_with_options(db_dir: PathBuf, options: Options) -> Result<Self> {
+        if options.wal_size_limit == 0 {
+            return Err(Error::InvalidOptions("wal_size_limit must be positive"));
+        }
+        if options.compaction_trigger < 2 {
+            return Err(Error::InvalidOptions(
+                "compaction_trigger must be at least two",
+            ));
+        }
         std::fs::DirBuilder::new().recursive(true).create(&db_dir)?;
         let wal_path = Path::new(&db_dir).join("wal.db");
         let lockfile_path = Path::new(&db_dir).join("LOCKFILE");
@@ -98,6 +125,7 @@ impl Db {
             sstables: table_list,
             db_dir,
             _lockfile,
+            options,
         };
 
         for record in records {
@@ -175,7 +203,7 @@ impl Db {
         }
         self.manifest.last_sequence = final_sequence;
 
-        if self.wal.size()? >= WAL_SIZE_LIMIT {
+        if self.wal.size()? >= self.options.wal_size_limit {
             self.flush_memtable()?;
         }
 
@@ -203,7 +231,7 @@ impl Db {
         self.manifest = next_manifest;
         self.wal.reset()?;
         self.memtable.clear();
-        if self.sstables.len() >= COMPACTION_TRIGGER {
+        if self.sstables.len() >= self.options.compaction_trigger {
             self.compact()?;
         }
         Ok(())
@@ -309,7 +337,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::Db;
+    use super::{Db, Options};
     use crate::{Error, Key, WriteBatch};
 
     fn path() -> std::path::PathBuf {
@@ -323,7 +351,14 @@ mod tests {
     #[test]
     fn recovers_multiple_sstables_and_wal() {
         let path = path();
-        let mut db = Db::open(path.clone()).unwrap();
+        let mut db = Db::open_with_options(
+            path.clone(),
+            Options {
+                wal_size_limit: 4 * 1024,
+                compaction_trigger: 2,
+            },
+        )
+        .unwrap();
 
         let mut first = WriteBatch::new();
         first.put("a", "old");

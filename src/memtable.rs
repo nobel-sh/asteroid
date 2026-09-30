@@ -1,6 +1,7 @@
 use crate::{
     entry::{Entry, Key, Lookup, StoredValue, Value},
-    Error, Result, WriteBatch, WriteOp,
+    write::WriteOp,
+    Error, Result, WriteBatch,
 };
 use std::collections::BTreeMap;
 

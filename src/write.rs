@@ -1,7 +1,7 @@
 use super::entry::{Key, Value};
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum WriteOp {
+pub(crate) enum WriteOp {
     Put { key: Key, value: Value },
     Delete { key: Key },
 }

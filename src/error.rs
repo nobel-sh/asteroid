@@ -12,6 +12,9 @@ pub enum DecodeError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("invalid database options: {0}")]
+    InvalidOptions(&'static str),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
