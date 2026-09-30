@@ -128,9 +128,11 @@ impl Db {
             options,
         };
 
+        let persisted_sequence = db.manifest.last_sequence;
+        let mut previous_last_sequence: Option<u64> = None;
         for record in records {
-            if record.batch.is_empty() {
-                continue;
+            if record.batch.is_empty() || record.first_sequence == 0 {
+                return Err(Error::CorruptWal("empty batch or zero sequence".into()));
             }
             let operation_count =
                 u64::try_from(record.batch.len()).map_err(|_| Error::SequenceExhausted)?;
@@ -138,9 +140,33 @@ impl Db {
                 .first_sequence
                 .checked_add(operation_count - 1)
                 .ok_or(Error::SequenceExhausted)?;
+            if let Some(previous) = previous_last_sequence {
+                if previous.checked_add(1) != Some(record.first_sequence) {
+                    return Err(Error::CorruptWal("non-consecutive batch sequences".into()));
+                }
+            }
+            previous_last_sequence = Some(last_sequence);
+
+            if last_sequence <= persisted_sequence {
+                continue;
+            }
+            if record.first_sequence <= persisted_sequence {
+                return Err(Error::CorruptWal(
+                    "batch crosses the persisted sequence boundary".into(),
+                ));
+            }
+            if db.manifest.last_sequence.checked_add(1) != Some(record.first_sequence) {
+                return Err(Error::CorruptWal(
+                    "missing batch before recovery sequence".into(),
+                ));
+            }
             db.memtable
                 .apply_batch(&record.batch, record.first_sequence)?;
-            db.manifest.last_sequence = db.manifest.last_sequence.max(last_sequence);
+            db.manifest.last_sequence = last_sequence;
+        }
+        if previous_last_sequence.is_some() && db.memtable.is_empty() {
+            // All WAL operations are persisted; clear them before accepting new writes.
+            db.wal.reset()?;
         }
         Ok(db)
     }
