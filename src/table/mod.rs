@@ -5,4 +5,5 @@ mod iter;
 mod sstable;
 
 pub(crate) use builder::SSTableBuilder;
+pub(crate) use iter::TableIterator;
 pub(crate) use sstable::SSTable;

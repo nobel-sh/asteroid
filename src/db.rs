@@ -2,12 +2,14 @@ use std::{
     collections::BTreeMap,
     ffi::OsStr,
     fs::{File, OpenOptions, TryLockError},
+    ops::RangeBounds,
     path::{Path, PathBuf},
 };
 
 use crate::{
     entry::{Entry, StoredValue},
     manifest::Manifest,
+    DbIterator,
 };
 
 use super::{
@@ -186,6 +188,17 @@ impl Db {
                 Ok(None)
             }
         }
+    }
+
+    /// Iterates over live entries in ascending byte order. Stops after the first error.
+    pub fn iter(&self) -> DbIterator<'_> {
+        self.range(..)
+    }
+
+    /// Scans live entries within the given bounds. Empty or reversed ranges yield nothing.
+    /// The iterator borrows the database, preventing writes until it is dropped.
+    pub fn range(&self, range: impl RangeBounds<Key>) -> DbIterator<'_> {
+        DbIterator::new(&self.memtable, &self.sstables, range)
     }
 
     pub fn put(&mut self, key: impl Into<Key>, value: impl Into<Value>) -> Result<()> {

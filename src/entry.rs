@@ -57,13 +57,13 @@ impl From<Vec<u8>> for Value {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum StoredValue {
     Data(Value),
     Tombstone,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Entry {
     pub(crate) sequence: u64,
     pub(crate) value: StoredValue,

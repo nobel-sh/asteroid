@@ -3,7 +3,10 @@ use crate::{
     write::WriteOp,
     Error, Result, WriteBatch,
 };
-use std::collections::BTreeMap;
+use std::{
+    collections::{btree_map, BTreeMap},
+    ops::Bound,
+};
 
 impl Entry {
     pub(crate) fn lookup(&self) -> Lookup<&[u8]> {
@@ -71,6 +74,14 @@ impl Memtable {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = (&Key, &Entry)> {
         self.entries.iter()
+    }
+
+    pub(crate) fn range(
+        &self,
+        start: Bound<Key>,
+        end: Bound<Key>,
+    ) -> btree_map::Range<'_, Key, Entry> {
+        self.entries.range((start, end))
     }
 
     pub(crate) fn is_empty(&self) -> bool {
