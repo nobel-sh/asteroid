@@ -18,7 +18,7 @@
 
 use std::{
     fs::{File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, Write},
     path::Path,
 };
 
@@ -32,6 +32,7 @@ const DELETE: u8 = 1;
 const PUT: u8 = 2;
 const MAGIC_BYTES: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
 const VERSION: u16 = 1;
+const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>() + size_of::<u32>();
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct WalRecord {
@@ -133,8 +134,11 @@ fn decode_payload(bytes: &[u8]) -> Result<WalRecord> {
     })
 }
 
-fn decode_record(decoder: &mut Decoder<'_>) -> Result<WalRecord> {
+fn decode_record(decoder: &mut Decoder<'_>) -> Result<Option<WalRecord>> {
     let record_start = decoder.position();
+    if decoder.bytes().len() - record_start < HEADER_SIZE {
+        return Ok(None);
+    }
 
     if decoder.take(MAGIC_BYTES.len())? != MAGIC_BYTES {
         return Err(Error::CorruptWal("invalid magic bytes".to_owned()));
@@ -148,6 +152,14 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<WalRecord> {
     }
 
     let payload_length = decoder.read_u32()? as usize;
+    let frame_end = decoder
+        .position()
+        .checked_add(payload_length)
+        .and_then(|end| end.checked_add(size_of::<u32>()))
+        .ok_or(crate::DecodeError::LengthOverflow)?;
+    if frame_end > decoder.bytes().len() {
+        return Ok(None);
+    }
     let payload = decoder.take(payload_length)?;
 
     let checksum_end = decoder.position();
@@ -158,7 +170,7 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<WalRecord> {
         return Err(Error::CorruptWal("checksum mismatch".to_owned()));
     }
 
-    decode_payload(payload)
+    decode_payload(payload).map(Some)
 }
 
 fn validate_sequence_range(first_sequence: u64, operation_count: u32) -> Result<()> {
@@ -173,6 +185,7 @@ fn validate_sequence_range(first_sequence: u64, operation_count: u32) -> Result<
 #[derive(Debug)]
 pub(crate) struct Wal {
     file: File,
+    requires_recovery: bool,
 }
 
 impl Wal {
@@ -182,24 +195,44 @@ impl Wal {
             .read(true)
             .append(true)
             .open(path)?;
-        Ok(Self { file })
+        Ok(Self {
+            file,
+            requires_recovery: false,
+        })
     }
 
     pub(crate) fn append(&mut self, first_sequence: u64, batch: &WriteBatch) -> Result<()> {
+        if self.requires_recovery {
+            return Err(Error::WalRequiresRecovery);
+        }
         let bytes = encode_record(first_sequence, batch)?;
+        // An I/O failure may leave a partial frame; do not append behind it.
+        self.requires_recovery = true;
         self.file.write_all(&bytes)?;
         self.file.sync_all()?;
+        self.requires_recovery = false;
         Ok(())
     }
 
     pub(crate) fn read_records(&mut self) -> Result<Vec<WalRecord>> {
+        self.requires_recovery = true;
+        self.file.rewind()?;
         let mut buffer = Vec::new();
         self.file.read_to_end(&mut buffer)?;
         let mut decoder = Decoder::new(&buffer);
         let mut records = Vec::new();
         while !decoder.is_empty() {
-            records.push(decode_record(&mut decoder)?);
+            let record_start = decoder.position();
+            match decode_record(&mut decoder)? {
+                Some(record) => records.push(record),
+                None => {
+                    self.file.set_len(record_start as u64)?;
+                    self.file.sync_all()?;
+                    break;
+                }
+            }
         }
+        self.requires_recovery = false;
         Ok(records)
     }
 
@@ -246,7 +279,7 @@ mod tests {
         drop(wal);
         let bytes = fs::read(&path).unwrap();
         let mut decoder = Decoder::new(&bytes);
-        let decoded = decode_record(&mut decoder).unwrap();
+        let decoded = decode_record(&mut decoder).unwrap().unwrap();
         fs::remove_file(path).unwrap();
 
         assert_eq!(decoded, expected);
