@@ -1,6 +1,6 @@
-use std::{ops::Bound, os::unix::fs::FileExt};
+use std::ops::Bound;
 
-use crate::{entry::Entry, table::data_block::decode_data_block, Error, Key, Result};
+use crate::{entry::Entry, Key, Result};
 
 use super::SSTable;
 
@@ -36,33 +36,7 @@ impl<'t> TableIterator<'t> {
     }
 
     fn load_block(&mut self) -> Result<()> {
-        let block_index = &self.table.index.entries[self.next_block];
-        let block_size =
-            usize::try_from(block_index.block_size).map_err(|_| Error::RecordTooLarge)?;
-        let mut buffer = vec![0_u8; block_size];
-        self.table
-            .file
-            .read_exact_at(&mut buffer, block_index.block_offset)?;
-        let block = decode_data_block(&buffer)?;
-        let Some((first_key, _)) = block.entries.first() else {
-            return Err(Error::CorruptSstable("empty indexed data block".into()));
-        };
-        if block
-            .entries
-            .last()
-            .is_none_or(|(key, _)| key != &block_index.last_key)
-        {
-            return Err(Error::CorruptSstable(
-                "index key does not match data block".into(),
-            ));
-        }
-        if self.next_block > 0
-            && first_key <= &self.table.index.entries[self.next_block - 1].last_key
-        {
-            return Err(Error::CorruptSstable(
-                "data blocks are not strictly sorted".into(),
-            ));
-        }
+        let block = self.table.read_block(self.next_block)?;
         let skip = block.entries.partition_point(|(key, _)| match &self.start {
             Bound::Included(start) => key < start,
             Bound::Excluded(start) => key <= start,

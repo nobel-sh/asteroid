@@ -20,8 +20,28 @@ pub(crate) struct EncodedDataBlock {
     pub(crate) last_key: Key,
 }
 
+#[derive(Debug)]
 pub(crate) struct DataBlock {
     pub(crate) entries: Vec<(Key, Entry)>,
+}
+
+impl DataBlock {
+    pub(crate) fn memory_usage(&self) -> usize {
+        size_of::<Self>()
+            + 2 * size_of::<usize>()
+            + self.entries.capacity() * size_of::<(Key, Entry)>()
+            + self
+                .entries
+                .iter()
+                .map(|(key, entry)| {
+                    key.heap_size()
+                        + match &entry.value {
+                            StoredValue::Data(value) => value.heap_size(),
+                            StoredValue::Tombstone => 0,
+                        }
+                })
+                .sum::<usize>()
+    }
 }
 
 impl DataBlockBuilder {

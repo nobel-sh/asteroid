@@ -2,12 +2,15 @@ use std::{
     fs::OpenOptions,
     io::{Seek, Write},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
+use super::bloom::{self, BloomFilter};
 use super::data_block::DataBlockBuilder;
 use super::sstable::{MAGIC_BYTES, VERSION};
 use super::SSTable;
 use crate::{
+    cache::BlockCache,
     entry::Entry,
     table::{
         data_block::EncodedDataBlock,
@@ -21,10 +24,17 @@ pub(crate) struct SSTableBuilder {
     table: SSTable,
     block_builder: DataBlockBuilder,
     last_key: Option<Key>,
+    hashes: Vec<u64>,
+    bits_per_key: u8,
 }
 
 impl SSTableBuilder {
-    pub(crate) fn new(directory: &Path, id: u32) -> Result<Self> {
+    pub(crate) fn new(
+        directory: &Path,
+        id: u32,
+        cache: Arc<BlockCache>,
+        bits_per_key: u8,
+    ) -> Result<Self> {
         let file_name = format!("{id:08}.sst.tmp");
         let mut file = OpenOptions::new()
             .create(true)
@@ -40,12 +50,16 @@ impl SSTableBuilder {
             index: IndexBlock {
                 entries: Vec::new(),
             },
+            filter: None,
+            cache,
         };
         Ok(SSTableBuilder {
             directory: directory.to_path_buf(),
             table,
             block_builder: DataBlockBuilder::new(),
             last_key: None,
+            hashes: Vec::new(),
+            bits_per_key,
         })
     }
 
@@ -73,6 +87,9 @@ impl SSTableBuilder {
             self.block_builder = DataBlockBuilder::new();
         }
         self.block_builder.add_entry(key, entry)?;
+        if self.bits_per_key > 0 {
+            self.hashes.push(bloom::hash(key.as_bytes()));
+        }
         self.last_key = Some(key.clone());
         Ok(())
     }
@@ -85,8 +102,21 @@ impl SSTableBuilder {
         let index_bytes = self.table.index.as_bytes()?;
         let index_size = u32::try_from(index_bytes.len()).map_err(|_| Error::RecordTooLarge)?;
         self.table.file.write_all(&index_bytes)?;
+        let filter_offset = self.table.file.stream_position()?;
+        self.table.filter = BloomFilter::build(&self.hashes, self.bits_per_key)?;
+        let filter_bytes = self
+            .table
+            .filter
+            .as_ref()
+            .map(BloomFilter::encode)
+            .transpose()?
+            .unwrap_or_default();
+        let filter_size = u32::try_from(filter_bytes.len()).map_err(|_| Error::RecordTooLarge)?;
+        self.table.file.write_all(&filter_bytes)?;
         self.table.file.write_all(&index_offset.to_be_bytes())?;
         self.table.file.write_all(&index_size.to_be_bytes())?;
+        self.table.file.write_all(&filter_offset.to_be_bytes())?;
+        self.table.file.write_all(&filter_size.to_be_bytes())?;
         self.table.file.sync_all()?;
         let path = self.table.path(&self.directory);
         std::fs::rename(path.with_extension("sst.tmp"), &path)?;

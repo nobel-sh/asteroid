@@ -1,8 +1,12 @@
 use super::{
-    builder::SSTableBuilder, data_block::decode_data_block, index_block::IndexBlock,
+    bloom::BloomFilter,
+    builder::SSTableBuilder,
+    data_block::{decode_data_block, DataBlock},
+    index_block::IndexBlock,
     iter::TableIterator,
 };
 use crate::{
+    cache::BlockCache,
     codec::Decoder,
     entry::{Key, Lookup, StoredValue, Value},
     error::{Error, Result},
@@ -13,18 +17,21 @@ use std::{
     fs::{File, OpenOptions},
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub(super) const MAGIC_BYTES: [u8; 4] = *b"SST1";
-pub(super) const VERSION: u16 = 1;
+pub(super) const VERSION: u16 = 2;
 const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>();
-const FOOTER_SIZE: usize = size_of::<u64>() + size_of::<u32>();
+const HANDLE_SIZE: usize = size_of::<u64>() + size_of::<u32>();
 
 #[derive(Debug)]
 pub(crate) struct SSTable {
     pub(super) id: u32,
     pub(super) file: File,
     pub(super) index: IndexBlock,
+    pub(super) filter: Option<BloomFilter>,
+    pub(super) cache: Arc<BlockCache>,
 }
 
 impl SSTable {
@@ -37,8 +44,14 @@ impl SSTable {
         TableIterator::new(self)
     }
 
-    pub(crate) fn create(directory: &Path, id: u32, memtable: &Memtable) -> Result<Self> {
-        let mut builder = SSTableBuilder::new(directory, id)?;
+    pub(crate) fn create(
+        directory: &Path,
+        id: u32,
+        memtable: &Memtable,
+        cache: Arc<BlockCache>,
+        bits_per_key: u8,
+    ) -> Result<Self> {
+        let mut builder = SSTableBuilder::new(directory, id, cache, bits_per_key)?;
         for (key, entry) in memtable.iter() {
             builder.add(key, entry)?;
         }
@@ -46,21 +59,25 @@ impl SSTable {
     }
 
     pub(crate) fn lookup(&self, key: &Key) -> Result<Lookup<Value>> {
-        let Some((expected_last_key, block_offset, block_size)) = self.index.find_block(key) else {
+        if self
+            .filter
+            .as_ref()
+            .is_some_and(|filter| !filter.may_contain(key.as_bytes()))
+        {
+            return Ok(Lookup::NotFound);
+        }
+        let Some(position) = self.index.find_block(key) else {
             return Ok(Lookup::NotFound);
         };
-        let block_size = usize::try_from(block_size).map_err(|_| Error::RecordTooLarge)?;
-        let mut bytes = vec![0; block_size];
-        self.file.read_exact_at(&mut bytes, block_offset)?;
-
-        let mut block = decode_data_block(&bytes)?;
-        if block
-            .entries
-            .last()
-            .is_none_or(|(last_key, _)| last_key != expected_last_key)
-        {
-            return Err(corrupt("index key does not match data block"));
-        }
+        let offset = self.index.entries[position].block_offset;
+        let block = match self.cache.get(self.id, offset) {
+            Some(block) => block,
+            None => {
+                let block = Arc::new(self.read_block(position)?);
+                self.cache.insert(self.id, offset, Arc::clone(&block));
+                block
+            }
+        };
 
         let Ok(position) = block
             .entries
@@ -68,25 +85,57 @@ impl SSTable {
         else {
             return Ok(Lookup::NotFound);
         };
-        match block.entries.swap_remove(position).1.value {
-            StoredValue::Data(value) => Ok(Lookup::Value(value)),
+        match &block.entries[position].1.value {
+            StoredValue::Data(value) => Ok(Lookup::Value(value.clone())),
             StoredValue::Tombstone => Ok(Lookup::Deleted),
         }
     }
 
-    pub(crate) fn open(path: &Path, id: u32) -> Result<Self> {
-        let file = OpenOptions::new().read(true).open(path)?;
-        let index = read_and_validate_metadata(&file)?;
+    pub(crate) fn read_block(&self, position: usize) -> Result<DataBlock> {
+        let entry = &self.index.entries[position];
+        let block_size = usize::try_from(entry.block_size).map_err(|_| Error::RecordTooLarge)?;
+        let mut bytes = vec![0; block_size];
+        self.file.read_exact_at(&mut bytes, entry.block_offset)?;
+        let block = decode_data_block(&bytes)?;
+        if block
+            .entries
+            .last()
+            .is_none_or(|(key, _)| key != &entry.last_key)
+        {
+            return Err(corrupt("index key does not match data block"));
+        }
+        if position > 0
+            && block
+                .entries
+                .first()
+                .is_some_and(|(key, _)| key <= &self.index.entries[position - 1].last_key)
+        {
+            return Err(corrupt("data blocks are not strictly sorted"));
+        }
+        Ok(block)
+    }
 
-        Ok(Self { id, file, index })
+    pub(crate) fn open(
+        path: &Path,
+        id: u32,
+        cache: Arc<BlockCache>,
+        use_filter: bool,
+    ) -> Result<Self> {
+        let file = OpenOptions::new().read(true).open(path)?;
+        let (index, filter) = read_and_validate_metadata(&file)?;
+
+        Ok(Self {
+            id,
+            file,
+            index,
+            filter: if use_filter { filter } else { None },
+            cache,
+        })
     }
 }
 
-fn read_and_validate_metadata(file: &File) -> Result<IndexBlock> {
+fn read_and_validate_metadata(file: &File) -> Result<(IndexBlock, Option<BloomFilter>)> {
     let file_size = file.metadata()?.len();
-    let footer_offset = file_size
-        .checked_sub(FOOTER_SIZE as u64)
-        .ok_or_else(|| corrupt("truncated footer"))?;
 
     let mut header_bytes = [0; HEADER_SIZE];
     file.read_exact_at(&mut header_bytes, 0)?;
@@ -95,18 +144,33 @@ fn read_and_validate_metadata(file: &File) -> Result<IndexBlock> {
         return Err(corrupt("invalid magic bytes"));
     }
     let version = header.read_u16()?;
-    if version != VERSION {
+    if version != 1 && version != VERSION {
         return Err(corrupt(format!("unsupported version {version}")));
     }
 
-    let mut footer_bytes = [0; FOOTER_SIZE];
+    let footer_size = if version == 1 {
+        HANDLE_SIZE
+    } else {
+        2 * HANDLE_SIZE
+    };
+    let footer_offset = file_size
+        .checked_sub(footer_size as u64)
+        .filter(|offset| *offset >= HEADER_SIZE as u64)
+        .ok_or_else(|| corrupt("truncated footer"))?;
+    let mut footer_bytes = vec![0; footer_size];
     file.read_exact_at(&mut footer_bytes, footer_offset)?;
     let mut footer = Decoder::new(&footer_bytes);
     let index_offset = footer.read_u64()?;
     let index_size = footer.read_u32()?;
+    let (filter_offset, filter_size) = if version == 1 {
+        (footer_offset, 0)
+    } else {
+        (footer.read_u64()?, footer.read_u32()?)
+    };
     footer.finish()?;
     if index_offset < HEADER_SIZE as u64
-        || index_offset.checked_add(u64::from(index_size)) != Some(footer_offset)
+        || index_offset.checked_add(u64::from(index_size)) != Some(filter_offset)
+        || filter_offset.checked_add(u64::from(filter_size)) != Some(footer_offset)
     {
         return Err(corrupt("invalid index location"));
     }
@@ -115,7 +179,14 @@ fn read_and_validate_metadata(file: &File) -> Result<IndexBlock> {
     file.read_exact_at(&mut index_bytes, index_offset)?;
     let index = IndexBlock::decode_index_block(&index_bytes)?;
     index.validate_block_handles(HEADER_SIZE as u64, index_offset)?;
-    Ok(index)
+    let filter = if filter_size == 0 {
+        None
+    } else {
+        let mut bytes = vec![0; filter_size as usize];
+        file.read_exact_at(&mut bytes, filter_offset)?;
+        Some(BloomFilter::decode(&bytes)?)
+    };
+    Ok((index, filter))
 }
 
 fn corrupt(message: impl Into<String>) -> Error {

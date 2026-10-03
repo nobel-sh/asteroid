@@ -84,11 +84,9 @@ impl IndexBlock {
         Ok(IndexBlock { entries })
     }
 
-    pub(crate) fn find_block(&self, key: &Key) -> Option<(&Key, u64, u32)> {
+    pub(crate) fn find_block(&self, key: &Key) -> Option<usize> {
         let position = self.entries.partition_point(|entry| entry.last_key < *key);
-        self.entries
-            .get(position)
-            .map(|entry| (&entry.last_key, entry.block_offset, entry.block_size))
+        self.entries.get(position).map(|_| position)
     }
 
     pub(crate) fn validate_block_handles(&self, data_offset: u64, index_offset: u64) -> Result<()> {

@@ -7,6 +7,10 @@ const ENTRY_HEADER_SIZE: usize = size_of::<u64>() + size_of::<u8>() + 2 * size_o
 pub struct Key(Vec<u8>);
 
 impl Key {
+    pub(crate) fn heap_size(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -34,6 +38,10 @@ impl From<Vec<u8>> for Key {
 pub struct Value(Vec<u8>);
 
 impl Value {
+    pub(crate) fn heap_size(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

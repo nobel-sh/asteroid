@@ -4,9 +4,11 @@ use std::{
     fs::{File, OpenOptions, TryLockError},
     ops::RangeBounds,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use crate::{
+    cache::BlockCache,
     entry::{Entry, StoredValue},
     manifest::Manifest,
     DbIterator,
@@ -27,6 +29,10 @@ pub struct Options {
     pub wal_size_limit: u64,
     /// Compact after a flush leaves at least this many SSTables. Must be at least two.
     pub compaction_trigger: usize,
+    /// Zero disables Bloom checks and filter creation for new tables.
+    pub bloom_bits_per_key: u8,
+    /// Budget for admitted decoded blocks; zero disables caching.
+    pub block_cache_bytes: usize,
 }
 
 impl Default for Options {
@@ -34,6 +40,8 @@ impl Default for Options {
         Self {
             wal_size_limit: 4 * 1024 * 1024,
             compaction_trigger: 4,
+            bloom_bits_per_key: 10,
+            block_cache_bytes: 16 * 1024 * 1024,
         }
     }
 }
@@ -47,6 +55,7 @@ pub struct Db {
     db_dir: PathBuf,
     _lockfile: File,
     options: Options,
+    cache: Arc<BlockCache>,
 }
 
 impl Db {
@@ -63,6 +72,12 @@ impl Db {
                 "compaction_trigger must be at least two",
             ));
         }
+        if options.bloom_bits_per_key > 64 {
+            return Err(Error::InvalidOptions(
+                "bloom_bits_per_key must be at most 64",
+            ));
+        }
+        let cache = Arc::new(BlockCache::new(options.block_cache_bytes));
         std::fs::DirBuilder::new().recursive(true).create(&db_dir)?;
         let wal_path = Path::new(&db_dir).join("wal.db");
         let lockfile_path = Path::new(&db_dir).join("LOCKFILE");
@@ -91,7 +106,12 @@ impl Db {
                     let path = discovered.remove(id).ok_or_else(|| {
                         Error::CorruptManifest(format!("live SSTable {id} is missing"))
                     })?;
-                    tables.push(SSTable::open(&path, *id)?);
+                    tables.push(SSTable::open(
+                        &path,
+                        *id,
+                        Arc::clone(&cache),
+                        options.bloom_bits_per_key > 0,
+                    )?);
                 }
 
                 let had_orphans = !discovered.is_empty();
@@ -128,6 +148,7 @@ impl Db {
             db_dir,
             _lockfile,
             options,
+            cache,
         };
 
         let persisted_sequence = db.manifest.last_sequence;
@@ -260,7 +281,13 @@ impl Db {
 
         let table_id = self.manifest.next_table_id;
         let next_table_id = table_id.checked_add(1).ok_or(Error::TableIdExhausted)?;
-        let table = SSTable::create(&self.db_dir, table_id, &self.memtable)?;
+        let table = SSTable::create(
+            &self.db_dir,
+            table_id,
+            &self.memtable,
+            Arc::clone(&self.cache),
+            self.options.bloom_bits_per_key,
+        )?;
         let mut next_manifest = self.manifest.clone();
         next_manifest.table_ids.push(table_id);
         next_manifest.next_table_id = next_table_id;
@@ -291,7 +318,12 @@ impl Db {
         for iter in &mut iterators {
             heads.push(iter.next().transpose()?);
         }
-        let mut builder = SSTableBuilder::new(&self.db_dir, replacement_id)?;
+        let mut builder = SSTableBuilder::new(
+            &self.db_dir,
+            replacement_id,
+            Arc::clone(&self.cache),
+            self.options.bloom_bits_per_key,
+        )?;
 
         loop {
             // choose the smallest key and only keep its newest
@@ -339,6 +371,7 @@ impl Db {
         let old_tables = std::mem::replace(&mut self.sstables, vec![replacement]);
         self.manifest = next_manifest;
         drop(old_tables);
+        self.cache.clear();
 
         for path in old_paths {
             match std::fs::remove_file(path) {
@@ -395,6 +428,7 @@ mod tests {
             Options {
                 wal_size_limit: 4 * 1024,
                 compaction_trigger: 2,
+                ..Options::default()
             },
         )
         .unwrap();
