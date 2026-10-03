@@ -42,6 +42,7 @@ impl<'a> DbIterator<'a> {
             .peekable(),
             tables: tables
                 .iter()
+                .filter(|table| !done && table.overlaps(start.as_ref(), end.as_ref()))
                 .map(|table| TableIterator::from_bounds(table, &start, end.clone()).peekable())
                 .collect(),
             done,

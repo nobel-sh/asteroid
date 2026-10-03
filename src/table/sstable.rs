@@ -15,15 +15,16 @@ use crate::{
 
 use std::{
     fs::{File, OpenOptions},
+    ops::Bound,
     os::unix::fs::FileExt,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 pub(super) const MAGIC_BYTES: [u8; 4] = *b"SST1";
-pub(super) const VERSION: u16 = 2;
+pub(super) const VERSION: u16 = 1;
 const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>();
-const HANDLE_SIZE: usize = size_of::<u64>() + size_of::<u32>();
+const FOOTER_SIZE: usize = 2 * (size_of::<u64>() + size_of::<u32>());
 
 #[derive(Debug)]
 pub(crate) struct SSTable {
@@ -58,7 +59,17 @@ impl SSTable {
         builder.finish()
     }
 
+    pub(crate) fn overlaps(&self, start: Bound<&Key>, end: Bound<&Key>) -> bool {
+        self.index.overlaps(start, end)
+    }
+
     pub(crate) fn lookup(&self, key: &Key) -> Result<Lookup<Value>> {
+        if !self
+            .index
+            .overlaps(Bound::Included(key), Bound::Included(key))
+        {
+            return Ok(Lookup::NotFound);
+        }
         if self
             .filter
             .as_ref()
@@ -104,6 +115,15 @@ impl SSTable {
         {
             return Err(corrupt("index key does not match data block"));
         }
+        if position == 0
+            && self
+                .index
+                .smallest_key
+                .as_ref()
+                .is_some_and(|first| block.entries.first().is_none_or(|(key, _)| key != first))
+        {
+            return Err(corrupt("smallest key does not match data block"));
+        }
         if position > 0
             && block
                 .entries
@@ -144,29 +164,21 @@ fn read_and_validate_metadata(file: &File) -> Result<(IndexBlock, Option<BloomFi
         return Err(corrupt("invalid magic bytes"));
     }
     let version = header.read_u16()?;
-    if version != 1 && version != VERSION {
+    if version != VERSION {
         return Err(corrupt(format!("unsupported version {version}")));
     }
 
-    let footer_size = if version == 1 {
-        HANDLE_SIZE
-    } else {
-        2 * HANDLE_SIZE
-    };
     let footer_offset = file_size
-        .checked_sub(footer_size as u64)
+        .checked_sub(FOOTER_SIZE as u64)
         .filter(|offset| *offset >= HEADER_SIZE as u64)
         .ok_or_else(|| corrupt("truncated footer"))?;
-    let mut footer_bytes = vec![0; footer_size];
+    let mut footer_bytes = [0; FOOTER_SIZE];
     file.read_exact_at(&mut footer_bytes, footer_offset)?;
     let mut footer = Decoder::new(&footer_bytes);
     let index_offset = footer.read_u64()?;
     let index_size = footer.read_u32()?;
-    let (filter_offset, filter_size) = if version == 1 {
-        (footer_offset, 0)
-    } else {
-        (footer.read_u64()?, footer.read_u32()?)
-    };
+    let filter_offset = footer.read_u64()?;
+    let filter_size = footer.read_u32()?;
     footer.finish()?;
     if index_offset < HEADER_SIZE as u64
         || index_offset.checked_add(u64::from(index_size)) != Some(filter_offset)

@@ -421,6 +421,53 @@ mod tests {
     }
 
     #[test]
+    fn searches_sstable_key_bounds() {
+        use std::ops::Bound::{Excluded, Included, Unbounded};
+
+        let path = path();
+        let options = Options {
+            wal_size_limit: 1,
+            compaction_trigger: 4,
+            bloom_bits_per_key: 0,
+            block_cache_bytes: 0,
+        };
+        let mut db = Db::open_with_options(path.clone(), options.clone()).unwrap();
+        let mut batch = WriteBatch::new();
+        batch.put("dog", "old");
+        batch.put("fox", "value");
+        batch.put("zebra", "value");
+        db.write(batch).unwrap();
+        db.delete("dog").unwrap();
+        drop(db);
+
+        let db = Db::open_with_options(path.clone(), options).unwrap();
+        for key in ["apple", "dog", "zz"] {
+            assert!(db.get(&Key::from(key)).unwrap().is_none());
+        }
+        for key in ["fox", "zebra"] {
+            assert!(db.get(&Key::from(key)).unwrap().is_some());
+        }
+        let scan = |start, end| {
+            db.range((start, end))
+                .map(|entry| entry.unwrap().0)
+                .collect::<Vec<_>>()
+        };
+        assert!(scan(Unbounded, Excluded(Key::from("dog"))).is_empty());
+        assert!(scan(Excluded(Key::from("zebra")), Unbounded).is_empty());
+        assert_eq!(
+            scan(Included(Key::from("fox")), Included(Key::from("zebra"))),
+            [Key::from("fox"), Key::from("zebra")]
+        );
+        assert_eq!(
+            scan(Excluded(Key::from("fox")), Included(Key::from("zebra"))),
+            [Key::from("zebra")]
+        );
+        assert!(scan(Included(Key::from("dog")), Included(Key::from("dog"))).is_empty());
+        drop(db);
+        fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn recovers_multiple_sstables_and_wal() {
         let path = path();
         let mut db = Db::open_with_options(

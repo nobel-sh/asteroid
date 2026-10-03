@@ -1,3 +1,5 @@
+use std::ops::Bound;
+
 use super::data_block::EncodedDataBlock;
 use crate::{
     codec::{Decoder, CHECKSUM_SIZE},
@@ -25,6 +27,7 @@ impl IndexEntry {
 
 #[derive(Debug)]
 pub(crate) struct IndexBlock {
+    pub(crate) smallest_key: Option<Key>,
     pub(crate) entries: Vec<IndexEntry>,
 }
 
@@ -33,6 +36,15 @@ impl IndexBlock {
         let mut index_buffer = Vec::new();
         let entry_count = u32::try_from(self.entries.len()).map_err(|_| Error::RecordTooLarge)?;
         index_buffer.extend_from_slice(&entry_count.to_be_bytes());
+        if !self.entries.is_empty() {
+            let key = self
+                .smallest_key
+                .as_ref()
+                .ok_or_else(|| corrupt("missing smallest key"))?;
+            let size = u32::try_from(key.as_bytes().len()).map_err(|_| Error::RecordTooLarge)?;
+            index_buffer.extend_from_slice(&size.to_be_bytes());
+            index_buffer.extend_from_slice(key.as_bytes());
+        }
         for entry in &self.entries {
             let last_key_size = u32::try_from(entry.last_key.as_bytes().len())
                 .map_err(|_| Error::RecordTooLarge)?;
@@ -60,6 +72,12 @@ impl IndexBlock {
         let mut entries = Vec::new();
         let mut decoder = Decoder::new(contents);
         let entry_count = decoder.read_u32()?;
+        let smallest_key = if entry_count > 0 {
+            let size = decoder.read_u32()? as usize;
+            Some(Key::from(decoder.take(size)?.to_vec()))
+        } else {
+            None
+        };
         for _ in 0..entry_count {
             let last_key_size = decoder.read_u32()?;
             let key_size = usize::try_from(last_key_size).map_err(|_| Error::RecordTooLarge)?;
@@ -81,7 +99,33 @@ impl IndexBlock {
         }
         decoder.finish()?;
 
-        Ok(IndexBlock { entries })
+        if smallest_key
+            .as_ref()
+            .is_some_and(|key| key > &entries[0].last_key)
+        {
+            return Err(corrupt("smallest key exceeds first block's last key"));
+        }
+        Ok(IndexBlock {
+            smallest_key,
+            entries,
+        })
+    }
+
+    pub(crate) fn overlaps(&self, start: Bound<&Key>, end: Bound<&Key>) -> bool {
+        let Some(last) = self.entries.last() else {
+            return false;
+        };
+        let after_end = match start {
+            Bound::Included(key) => key > &last.last_key,
+            Bound::Excluded(key) => key >= &last.last_key,
+            Bound::Unbounded => false,
+        };
+        let before_start = self.smallest_key.as_ref().is_some_and(|first| match end {
+            Bound::Included(key) => key < first,
+            Bound::Excluded(key) => key <= first,
+            Bound::Unbounded => false,
+        });
+        !after_end && !before_start
     }
 
     pub(crate) fn find_block(&self, key: &Key) -> Option<usize> {

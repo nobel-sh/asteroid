@@ -48,6 +48,7 @@ impl SSTableBuilder {
             id,
             file,
             index: IndexBlock {
+                smallest_key: None,
                 entries: Vec::new(),
             },
             filter: None,
@@ -87,6 +88,9 @@ impl SSTableBuilder {
             self.block_builder = DataBlockBuilder::new();
         }
         self.block_builder.add_entry(key, entry)?;
+        if self.table.index.smallest_key.is_none() {
+            self.table.index.smallest_key = Some(key.clone());
+        }
         if self.bits_per_key > 0 {
             self.hashes.push(bloom::hash(key.as_bytes()));
         }
