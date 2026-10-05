@@ -25,7 +25,7 @@ pub(crate) struct SSTableBuilder {
     block_builder: DataBlockBuilder,
     last_key: Option<Key>,
     hashes: Vec<u64>,
-    bits_per_key: u8,
+    bits_per_key: Option<u8>,
 }
 
 impl SSTableBuilder {
@@ -33,7 +33,7 @@ impl SSTableBuilder {
         directory: &Path,
         id: u32,
         cache: Arc<BlockCache>,
-        bits_per_key: u8,
+        bits_per_key: Option<u8>,
     ) -> Result<Self> {
         let file_name = format!("{id:08}.sst.tmp");
         let mut file = OpenOptions::new()
@@ -91,7 +91,7 @@ impl SSTableBuilder {
         if self.table.index.smallest_key.is_none() {
             self.table.index.smallest_key = Some(key.clone());
         }
-        if self.bits_per_key > 0 {
+        if self.bits_per_key.is_some() {
             self.hashes.push(bloom::hash(key.as_bytes()));
         }
         self.last_key = Some(key.clone());

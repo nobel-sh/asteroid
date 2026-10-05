@@ -50,7 +50,7 @@ impl SSTable {
         id: u32,
         memtable: &Memtable,
         cache: Arc<BlockCache>,
-        bits_per_key: u8,
+        bits_per_key: Option<u8>,
     ) -> Result<Self> {
         let mut builder = SSTableBuilder::new(directory, id, cache, bits_per_key)?;
         for (key, entry) in memtable.iter() {

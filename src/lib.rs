@@ -1,5 +1,6 @@
 mod cache;
 mod codec;
+mod config;
 mod db;
 mod entry;
 mod error;
@@ -10,7 +11,8 @@ mod table;
 mod wal;
 mod write;
 
-pub use db::{Db, Options};
+pub use config::{Options, WriteOptions};
+pub use db::Db;
 pub use entry::{Key, Value};
 pub use error::{DecodeError, Error, Result};
 pub use iter::DbIterator;

@@ -202,7 +202,12 @@ impl Wal {
         })
     }
 
-    pub(crate) fn append(&mut self, first_sequence: u64, batch: &WriteBatch) -> Result<()> {
+    pub(crate) fn append(
+        &mut self,
+        first_sequence: u64,
+        batch: &WriteBatch,
+        sync: bool,
+    ) -> Result<()> {
         if self.requires_recovery {
             return Err(Error::WalRequiresRecovery);
         }
@@ -210,6 +215,18 @@ impl Wal {
         // An I/O failure may leave a partial frame; do not append behind it.
         self.requires_recovery = true;
         self.file.write_all(&bytes)?;
+        if sync {
+            self.file.sync_all()?;
+        }
+        self.requires_recovery = false;
+        Ok(())
+    }
+
+    pub(crate) fn sync(&mut self) -> Result<()> {
+        if self.requires_recovery {
+            return Err(Error::WalRequiresRecovery);
+        }
+        self.requires_recovery = true;
         self.file.sync_all()?;
         self.requires_recovery = false;
         Ok(())
@@ -275,7 +292,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("wal-{}-{unique}.log", std::process::id()));
 
         let mut wal = Wal::open(&path).unwrap();
-        wal.append(expected.first_sequence, &expected.batch)
+        wal.append(expected.first_sequence, &expected.batch, true)
             .unwrap();
         drop(wal);
         let bytes = fs::read(&path).unwrap();

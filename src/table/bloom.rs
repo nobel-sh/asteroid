@@ -22,10 +22,10 @@ fn positions(hash: u64, probes: u8, bytes: usize) -> impl Iterator<Item = usize>
 }
 
 impl BloomFilter {
-    pub(crate) fn build(hashes: &[u64], bits_per_key: u8) -> Result<Option<Self>> {
-        if bits_per_key == 0 {
+    pub(crate) fn build(hashes: &[u64], bits_per_key: Option<u8>) -> Result<Option<Self>> {
+        let Some(bits_per_key) = bits_per_key else {
             return Ok(None);
-        }
+        };
         let bit_count = hashes
             .len()
             .checked_mul(usize::from(bits_per_key))
@@ -93,7 +93,7 @@ mod tests {
     #[test]
     fn bloom_filter_operations() {
         let hashes: Vec<_> = (0u64..100).map(|key| hash(&key.to_be_bytes())).collect();
-        let filter = BloomFilter::build(&hashes, 10).unwrap().unwrap();
+        let filter = BloomFilter::build(&hashes, Some(10)).unwrap().unwrap();
         let mut bytes = filter.encode().unwrap();
         let decoded = BloomFilter::decode(&bytes).unwrap();
 
@@ -105,6 +105,6 @@ mod tests {
 
         bytes[6] ^= 1;
         assert!(BloomFilter::decode(&bytes).is_err());
-        assert!(BloomFilter::build(&hashes, 0).unwrap().is_none());
+        assert!(BloomFilter::build(&hashes, None).unwrap().is_none());
     }
 }

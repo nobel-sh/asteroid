@@ -37,12 +37,12 @@ impl State {
 
 #[derive(Debug, Default)]
 pub(crate) struct BlockCache {
-    capacity: usize,
+    capacity: Option<usize>,
     state: Mutex<State>,
 }
 
 impl BlockCache {
-    pub(crate) fn new(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: Option<usize>) -> Self {
         Self {
             capacity,
             ..Self::default()
@@ -56,9 +56,7 @@ impl BlockCache {
     }
 
     pub(crate) fn get(&self, table_id: u32, offset: u64) -> Option<Arc<DataBlock>> {
-        if self.capacity == 0 {
-            return None;
-        }
+        self.capacity?;
         let key = (table_id, offset);
         let mut state = self.state.lock().ok()?;
         let stamp = state.stamp();
@@ -72,11 +70,11 @@ impl BlockCache {
     }
 
     pub(crate) fn insert(&self, table_id: u32, offset: u64, block: Arc<DataBlock>) {
-        if self.capacity == 0 {
+        let Some(capacity) = self.capacity else {
             return;
-        }
+        };
         let charge = block.memory_usage();
-        if charge > self.capacity {
+        if charge > capacity {
             return;
         }
         let key = (table_id, offset);
@@ -87,7 +85,7 @@ impl BlockCache {
         if state.blocks.contains_key(&key) {
             return;
         }
-        while state.bytes > self.capacity - charge {
+        while state.bytes > capacity - charge {
             let (_, oldest) = state.order.pop_first().unwrap();
             let entry = state.blocks.remove(&oldest).unwrap();
             state.bytes -= entry.charge;
@@ -114,7 +112,7 @@ mod tests {
         let block = Arc::new(DataBlock {
             entries: Vec::new(),
         });
-        let cache = BlockCache::new(2 * block.memory_usage());
+        let cache = BlockCache::new(Some(2 * block.memory_usage()));
         cache.insert(1, 0, Arc::clone(&block));
         cache.insert(1, 4096, Arc::clone(&block));
         assert!(Arc::ptr_eq(&cache.get(1, 0).unwrap(), &block));
@@ -123,14 +121,14 @@ mod tests {
         assert!(cache.get(1, 4096).is_none());
         assert!(cache.get(1, 0).is_some());
         assert!(cache.get(2, 0).is_some());
-        assert!(cache.state.lock().unwrap().bytes <= cache.capacity);
+        assert!(cache.state.lock().unwrap().bytes <= cache.capacity.unwrap());
 
         cache.clear();
         assert!(cache.get(1, 0).is_none());
         assert!(cache.get(2, 0).is_none());
         assert_eq!(cache.state.lock().unwrap().bytes, 0);
 
-        let disabled = BlockCache::new(0);
+        let disabled = BlockCache::new(None);
         disabled.insert(1, 0, block);
         assert!(disabled.get(1, 0).is_none());
     }
