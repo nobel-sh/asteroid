@@ -17,3 +17,7 @@ pub use entry::{Key, Value};
 pub use error::{DecodeError, Error, Result};
 pub use iter::DbIterator;
 pub use write::WriteBatch;
+
+#[cfg(test)]
+#[path = "../tests/common/mod.rs"]
+mod test_util;

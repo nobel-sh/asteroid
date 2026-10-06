@@ -108,3 +108,32 @@ fn decode_error(error: DecodeError) -> Error {
 fn corrupt(message: impl Into<String>) -> Error {
     Error::CorruptManifest(message.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Manifest;
+    use crate::{test_util::test_dir, Error};
+    use std::fs;
+
+    #[test]
+    fn rejects_corrupted_checksum() {
+        let path = test_dir("manifest-checksum");
+        fs::create_dir_all(&path).unwrap();
+        let manifest = Manifest {
+            last_sequence: 0,
+            next_table_id: 1,
+            table_ids: Vec::new(),
+        };
+        manifest.store(&path).unwrap();
+        assert!(Manifest::load(&path).unwrap().is_some());
+        let file = path.join("MANIFEST");
+        let mut bytes = fs::read(&file).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        fs::write(file, bytes).unwrap();
+        assert!(matches!(
+            Manifest::load(&path),
+            Err(Error::CorruptManifest(_))
+        ));
+        fs::remove_dir_all(path).unwrap();
+    }
+}

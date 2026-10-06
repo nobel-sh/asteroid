@@ -267,16 +267,11 @@ impl Wal {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        fs,
-        time::{SystemTime, UNIX_EPOCH},
-    };
-
-    use super::{decode_record, Wal, WalRecord};
+    use super::{decode_record, encode_record, WalRecord};
     use crate::{codec::Decoder, WriteBatch};
 
     #[test]
-    fn batch_round_trips_through_a_file() {
+    fn batch_record_round_trips() {
         let mut batch = WriteBatch::new();
         batch.put("foo", "bar");
         batch.delete("old-key");
@@ -285,21 +280,22 @@ mod tests {
             first_sequence: 10,
             batch,
         };
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let path = std::env::temp_dir().join(format!("wal-{}-{unique}.log", std::process::id()));
-
-        let mut wal = Wal::open(&path).unwrap();
-        wal.append(expected.first_sequence, &expected.batch, true)
-            .unwrap();
-        drop(wal);
-        let bytes = fs::read(&path).unwrap();
+        let bytes = encode_record(expected.first_sequence, &expected.batch).unwrap();
         let mut decoder = Decoder::new(&bytes);
         let decoded = decode_record(&mut decoder).unwrap().unwrap();
-        fs::remove_file(path).unwrap();
-
         assert_eq!(decoded, expected);
+        assert!(decoder.is_empty());
+    }
+
+    #[test]
+    fn rejects_corrupted_checksum() {
+        let mut batch = WriteBatch::new();
+        batch.put("key", "value");
+        let mut bytes = encode_record(1, &batch).unwrap();
+        *bytes.last_mut().unwrap() ^= 1;
+        assert!(matches!(
+            decode_record(&mut Decoder::new(&bytes)),
+            Err(crate::Error::CorruptWal(_))
+        ));
     }
 }

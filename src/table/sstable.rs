@@ -204,3 +204,31 @@ fn read_and_validate_metadata(file: &File) -> Result<(IndexBlock, Option<BloomFi
 fn corrupt(message: impl Into<String>) -> Error {
     Error::CorruptSstable(message.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{read_and_validate_metadata, SSTable};
+    use crate::{cache::BlockCache, memtable::Memtable, test_util::test_dir, Error, Key, Value};
+    use std::{fs, sync::Arc};
+
+    #[test]
+    fn rejects_corrupted_header() {
+        let path = test_dir("sstable-header");
+        fs::create_dir_all(&path).unwrap();
+        let mut memtable = Memtable::default();
+        memtable.put(1, Key::from("key"), Value::from("value"));
+        let table =
+            SSTable::create(&path, 1, &memtable, Arc::new(BlockCache::new(None)), None).unwrap();
+        assert!(read_and_validate_metadata(&table.file).is_ok());
+        let file = table.path(&path);
+        drop(table);
+        let mut bytes = fs::read(&file).unwrap();
+        bytes[0] ^= 1;
+        fs::write(&file, bytes).unwrap();
+        assert!(matches!(
+            read_and_validate_metadata(&fs::File::open(file).unwrap()),
+            Err(Error::CorruptSstable(_))
+        ));
+        fs::remove_dir_all(path).unwrap();
+    }
+}

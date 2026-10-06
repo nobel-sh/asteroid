@@ -180,7 +180,7 @@ mod tests {
                 crc32fast::hash(&block.bytes[..checksum_at])
             );
             let decoded = decode_data_block(&block.bytes).unwrap();
-            assert_eq!(decoded.entries.last().unwrap().0, block.last_key);
+            assert_eq!(decoded.entries, vec![(key.clone(), entry.clone())]);
         }
     }
 }

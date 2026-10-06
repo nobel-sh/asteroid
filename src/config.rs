@@ -62,3 +62,38 @@ impl Default for WriteOptions {
         Self { sync: true }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Options;
+
+    #[test]
+    fn validates_options() {
+        let defaults = Options::default();
+        assert!(defaults.validate().is_ok());
+        for options in [
+            Options {
+                wal_size_limit: 0,
+                ..defaults.clone()
+            },
+            Options {
+                compaction_trigger: 1,
+                ..defaults.clone()
+            },
+            Options {
+                bloom_bits_per_key: Some(0),
+                ..defaults.clone()
+            },
+            Options {
+                bloom_bits_per_key: Some(65),
+                ..defaults.clone()
+            },
+            Options {
+                block_cache_bytes: Some(0),
+                ..defaults.clone()
+            },
+        ] {
+            assert!(options.validate().is_err());
+        }
+    }
+}
