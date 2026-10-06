@@ -1,5 +1,5 @@
 [package]
-name = "ligma"
+name = "asteroiddb"
 edition = "2021"
 
 [dependencies]

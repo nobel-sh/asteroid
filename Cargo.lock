@@ -3,6 +3,15 @@
 version = 4
 
 [[package]]
+name = "asteroiddb"
+version = "0.0.0"
+dependencies = [
+ "crc32fast",
+ "thiserror",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15,15 +24,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9481c1c90cbf2ac953f07c8d4a58aa3945c425b7185c9154d67a65e4230da511"
 dependencies = [
  "cfg-if",
-]
-
-[[package]]
-name = "ligma"
-version = "0.0.0"
-dependencies = [
- "crc32fast",
- "thiserror",
- "xxhash-rust",
 ]
 
 [[package]]
