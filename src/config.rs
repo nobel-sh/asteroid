@@ -2,8 +2,8 @@ use crate::{Error, Result};
 
 #[derive(Clone, Debug)]
 pub struct Options {
-    /// Flush after a write brings the WAL to at least this many bytes
-    pub wal_size_limit: u64,
+    /// Flush after a complete write brings estimated memtable memory to this limit.
+    pub memtable_bytes: usize,
     /// Compact after a flush leaves at least this many SSTables
     pub compaction_trigger: usize,
     /// Bits per key for Bloom filters
@@ -15,7 +15,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            wal_size_limit: 4 * 1024 * 1024,
+            memtable_bytes: 4 * 1024 * 1024,
             compaction_trigger: 4,
             bloom_bits_per_key: Some(10),
             block_cache_bytes: Some(16 * 1024 * 1024),
@@ -25,8 +25,8 @@ impl Default for Options {
 
 impl Options {
     pub(crate) fn validate(&self) -> Result<()> {
-        if self.wal_size_limit == 0 {
-            return Err(Error::InvalidOptions("wal_size_limit must be positive"));
+        if self.memtable_bytes == 0 {
+            return Err(Error::InvalidOptions("memtable_bytes must be positive"));
         }
         if self.compaction_trigger < 2 {
             return Err(Error::InvalidOptions(
@@ -73,7 +73,7 @@ mod tests {
         assert!(defaults.validate().is_ok());
         for options in [
             Options {
-                wal_size_limit: 0,
+                memtable_bytes: 0,
                 ..defaults.clone()
             },
             Options {

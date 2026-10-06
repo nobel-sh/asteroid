@@ -9,6 +9,14 @@ use std::{
 };
 
 impl Entry {
+    fn memory_usage(&self) -> usize {
+        size_of::<Self>()
+            + match &self.value {
+                StoredValue::Data(value) => value.heap_size(),
+                StoredValue::Tombstone => 0,
+            }
+    }
+
     pub(crate) fn lookup(&self) -> Lookup<&[u8]> {
         match &self.value {
             StoredValue::Data(value) => Lookup::Value(value.as_bytes()),
@@ -20,6 +28,7 @@ impl Entry {
 #[derive(Debug, Default)]
 pub(crate) struct Memtable {
     entries: BTreeMap<Key, Entry>,
+    estimated_bytes: usize,
 }
 
 impl Memtable {
@@ -50,13 +59,24 @@ impl Memtable {
     }
 
     pub(crate) fn apply(&mut self, key: Key, entry: Entry) {
-        if self
-            .entries
-            .get(&key)
-            .is_none_or(|current| entry.sequence > current.sequence)
-        {
-            self.entries.insert(key, entry);
+        match self.entries.entry(key) {
+            btree_map::Entry::Occupied(mut slot) => {
+                if entry.sequence > slot.get().sequence {
+                    self.estimated_bytes -= slot.get().memory_usage();
+                    self.estimated_bytes += entry.memory_usage();
+                    slot.insert(entry);
+                }
+            }
+            btree_map::Entry::Vacant(slot) => {
+                self.estimated_bytes +=
+                    size_of::<Key>() + slot.key().heap_size() + entry.memory_usage();
+                slot.insert(entry);
+            }
         }
+    }
+
+    pub(crate) fn estimated_bytes(&self) -> usize {
+        self.estimated_bytes
     }
 
     pub(crate) fn apply_batch(&mut self, batch: &WriteBatch, starting_sequence: u64) -> Result<()> {
@@ -89,5 +109,6 @@ impl Memtable {
     }
     pub(crate) fn clear(&mut self) {
         self.entries.clear();
+        self.estimated_bytes = 0;
     }
 }

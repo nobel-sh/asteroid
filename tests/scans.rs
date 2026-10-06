@@ -9,7 +9,7 @@ use common::test_dir;
 fn scans_match_a_map_after_flushes_compaction_and_reopening() {
     let path = test_dir("scans");
     let options = Options {
-        wal_size_limit: 1,
+        memtable_bytes: 1,
         compaction_trigger: 2,
         ..Options::default()
     };
@@ -77,7 +77,7 @@ fn searches_sstable_key_bounds() {
 
     let path = test_dir("migrated");
     let options = Options {
-        wal_size_limit: 1,
+        memtable_bytes: 1,
         compaction_trigger: 4,
         bloom_bits_per_key: None,
         block_cache_bytes: None,
@@ -122,7 +122,7 @@ fn searches_sstable_key_bounds() {
 fn reads_across_tables_and_memtable() {
     let path = test_dir("layers");
     let options = Options {
-        wal_size_limit: 128,
+        memtable_bytes: 256,
         compaction_trigger: 10,
         ..Options::default()
     };

@@ -254,10 +254,6 @@ impl Wal {
         Ok(records)
     }
 
-    pub(crate) fn size(&self) -> Result<u64> {
-        Ok(self.file.metadata()?.len())
-    }
-
     pub(crate) fn reset(&mut self) -> Result<()> {
         self.file.set_len(0)?;
         self.file.sync_all()?;

@@ -184,7 +184,7 @@ impl Db {
         }
         self.manifest.last_sequence = final_sequence;
 
-        if self.wal.size()? >= self.options.wal_size_limit {
+        if self.memtable.estimated_bytes() >= self.options.memtable_bytes {
             self.flush_memtable()?;
         }
 

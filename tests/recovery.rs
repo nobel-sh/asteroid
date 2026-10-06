@@ -40,7 +40,7 @@ fn recovers_multiple_sstables_and_wal() {
     let mut db = Db::open_with_options(
         path.clone(),
         Options {
-            wal_size_limit: 4 * 1024,
+            memtable_bytes: 4 * 1024,
             compaction_trigger: 2,
             ..Options::default()
         },
@@ -156,11 +156,45 @@ fn locks_database_until_closed() {
 #[test]
 fn rejects_invalid_options() {
     let options = Options {
-        wal_size_limit: 0,
+        memtable_bytes: 0,
         ..Options::default()
     };
     assert!(matches!(
         Db::open_with_options(test_dir("options"), options),
         Err(Error::InvalidOptions(_))
     ));
+}
+
+#[test]
+fn memory_limit_counts_live_entries_and_recovered_writes() {
+    let path = test_dir("memtable-limit");
+    let options = Options {
+        memtable_bytes: 256,
+        ..Options::default()
+    };
+    let mut db = Db::open_with_options(path.clone(), options.clone()).unwrap();
+    for n in 0..8 {
+        db.put("a", vec![n; 128]).unwrap();
+    }
+    assert!(!path.join("00000001.sst").exists());
+    drop(db);
+
+    let mut db = Db::open_with_options(path.clone(), options.clone()).unwrap();
+    db.put("b", vec![1; 128]).unwrap();
+    assert!(path.join("00000001.sst").exists());
+    assert_eq!(fs::metadata(path.join("wal.db")).unwrap().len(), 0);
+    db.put("c", vec![2; 128]).unwrap();
+    assert!(!path.join("00000002.sst").exists());
+    assert!(fs::metadata(path.join("wal.db")).unwrap().len() > 0);
+    drop(db);
+
+    let db = Db::open_with_options(path.clone(), options).unwrap();
+    for (key, byte) in [("a", 7), ("b", 1), ("c", 2)] {
+        assert_eq!(
+            db.get(&Key::from(key)).unwrap(),
+            Some(vec![byte; 128].into())
+        );
+    }
+    drop(db);
+    fs::remove_dir_all(path).unwrap();
 }
