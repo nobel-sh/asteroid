@@ -3,7 +3,7 @@
 //!
 //! ```text
 //! record    = magic<4 bytes> + version<2 bytes> + payload_size<4 bytes> +
-//!             payload<payload_size bytes> + checksum<4 bytes>
+//!             header_checksum<4 bytes> + payload<payload_size bytes> + checksum<4 bytes>
 //!
 //! payload   = first_sequence<8 bytes> + operation_count<4 bytes> +
 //!             operation<operation_count entries>
@@ -14,7 +14,8 @@
 //! kind = 1 (Delete) | 2 (Put)
 //! ```
 //!
-//! Checksum is CRC32 and covers everything before the checksum.
+//! Both checksums are CRC32 and cover everything before their respective fields.
+//! The header checksum protects the length before recovery trusts it.
 
 use std::{
     fs::{File, OpenOptions},
@@ -33,7 +34,7 @@ const DELETE: u8 = 1;
 const PUT: u8 = 2;
 const MAGIC_BYTES: [u8; 4] = [0xCA, 0xFE, 0xBA, 0xBE];
 const VERSION: u16 = 1;
-const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>() + size_of::<u32>();
+const HEADER_SIZE: usize = MAGIC_BYTES.len() + size_of::<u16>() + 2 * size_of::<u32>();
 
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) struct WalRecord {
@@ -49,6 +50,7 @@ pub(crate) fn encode_record(first_sequence: u64, batch: &WriteBatch) -> Result<V
     let payload = encode_payload(first_sequence, batch)?;
     let payload_length = u32::try_from(payload.len()).map_err(|_| Error::RecordTooLarge)?;
     bytes.extend_from_slice(&payload_length.to_be_bytes());
+    bytes.extend_from_slice(&crc32fast::hash(&bytes).to_be_bytes());
     bytes.extend_from_slice(&payload);
 
     let checksum = crc32fast::hash(&bytes);
@@ -153,6 +155,11 @@ fn decode_record(decoder: &mut Decoder<'_>) -> Result<Option<WalRecord>> {
     }
 
     let payload_length = decoder.read_u32()? as usize;
+    let header_end = decoder.position();
+    let header_checksum = decoder.read_u32()?;
+    if crc32fast::hash(&decoder.bytes()[record_start..header_end]) != header_checksum {
+        return Err(Error::CorruptWal("header checksum mismatch".to_owned()));
+    }
     let frame_end = decoder
         .position()
         .checked_add(payload_length)
@@ -263,8 +270,9 @@ impl Wal {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_record, encode_record, WalRecord};
-    use crate::{codec::Decoder, WriteBatch};
+    use super::{decode_record, encode_record, Wal, WalRecord, HEADER_SIZE};
+    use crate::{codec::Decoder, test_util::test_dir, Error, WriteBatch};
+    use std::fs;
 
     #[test]
     fn batch_record_round_trips() {
@@ -293,5 +301,35 @@ mod tests {
             decode_record(&mut Decoder::new(&bytes)),
             Err(crate::Error::CorruptWal(_))
         ));
+    }
+
+    #[test]
+    fn corrupt_headers_never_truncate_acknowledged_records() {
+        let directory = test_dir("wal-header-corruption");
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("wal.db");
+        let mut batch = WriteBatch::new();
+        batch.put("key", "safe");
+        let first = encode_record(1, &batch).unwrap();
+        let mut bytes = first.clone();
+        bytes.extend_from_slice(&encode_record(2, &batch).unwrap());
+        for start in [0, first.len()] {
+            for offset in 0..HEADER_SIZE {
+                for bit in 0..8 {
+                    let mut corrupted = bytes.clone();
+                    corrupted[start + offset] ^= 1 << bit;
+                    fs::write(&path, &corrupted).unwrap();
+                    assert!(
+                        matches!(
+                            Wal::open(&path).unwrap().read_records(),
+                            Err(Error::CorruptWal(_))
+                        ),
+                        "record {start}, header byte {offset}, bit {bit}"
+                    );
+                    assert_eq!(fs::read(&path).unwrap(), corrupted);
+                }
+            }
+        }
+        fs::remove_dir_all(directory).unwrap();
     }
 }
