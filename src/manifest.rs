@@ -8,6 +8,11 @@ use std::{
 const MAGIC_BYTES: [u8; 4] = *b"MNFT";
 const VERSION: u16 = 1;
 
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_DIRECTORY_SYNC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 #[derive(Clone, Debug)]
 pub(crate) struct Manifest {
     pub(crate) last_sequence: u64,
@@ -42,6 +47,14 @@ impl Manifest {
 
         let file_name = directory.join("MANIFEST");
         std::fs::rename(tmp_file_name, file_name)?;
+        #[cfg(test)]
+        if FAIL_DIRECTORY_SYNC.with(|count| {
+            let remaining = count.get();
+            count.set(remaining.saturating_sub(1));
+            remaining == 1
+        }) {
+            return Err(std::io::Error::other("injected directory sync failure").into());
+        }
         std::fs::File::open(directory)?.sync_all()?;
         Ok(())
     }

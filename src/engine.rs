@@ -93,6 +93,7 @@ impl Db {
             _lockfile,
             options,
             cache,
+            requires_recovery: false,
         };
 
         let persisted_sequence = db.manifest.last_sequence;
@@ -156,6 +157,9 @@ impl Db {
     }
 
     pub(super) fn write_inner(&mut self, batch: WriteBatch, options: WriteOptions) -> Result<()> {
+        if self.requires_recovery {
+            return Err(Error::DbRequiresRecovery);
+        }
         if batch.is_empty() {
             return Ok(());
         }
@@ -185,7 +189,10 @@ impl Db {
         self.manifest.last_sequence = final_sequence;
 
         if self.memtable.estimated_bytes() >= self.options.memtable_bytes {
+            // A failed publication may already have replaced the on-disk manifest.
+            self.requires_recovery = true;
             self.flush_memtable()?;
+            self.requires_recovery = false;
         }
 
         Ok(())
@@ -317,4 +324,61 @@ fn discover_sstables(directory: &Path) -> Result<BTreeMap<u32, PathBuf>> {
         tables.insert(id, path);
     }
     Ok(tables)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{manifest::FAIL_DIRECTORY_SYNC, test_util::test_dir};
+
+    #[test]
+    fn failed_manifest_publication_requires_reopening_before_writes() {
+        for publication in [1, 2] {
+            let path = test_dir("failed-publication");
+            let options = Options {
+                memtable_bytes: 1,
+                compaction_trigger: 2,
+                ..Options::default()
+            };
+            let mut db = Db::open_with_options(path.clone(), options.clone()).unwrap();
+            db.put("a", "safe").unwrap();
+            // Fail after rename in the next flush (1) or compaction (2).
+            FAIL_DIRECTORY_SYNC.with(|count| count.set(publication));
+            assert!(matches!(db.put("b", "pending"), Err(Error::Io(_))));
+            let published = Manifest::load(&path).unwrap().unwrap();
+            assert_eq!(
+                published.table_ids,
+                if publication == 1 {
+                    vec![1, 2]
+                } else {
+                    vec![3]
+                }
+            );
+            let wal_bytes = std::fs::read(path.join("wal.db")).unwrap();
+            assert!(matches!(
+                db.put("c", "unsafe"),
+                Err(Error::DbRequiresRecovery)
+            ));
+            assert!(matches!(db.delete("a"), Err(Error::DbRequiresRecovery)));
+            assert!(matches!(
+                db.write(WriteBatch::new()),
+                Err(Error::DbRequiresRecovery)
+            ));
+            assert!(matches!(db.sync_wal(), Err(Error::DbRequiresRecovery)));
+            assert_eq!(std::fs::read(path.join("wal.db")).unwrap(), wal_bytes);
+            drop(db);
+
+            let mut db = Db::open_with_options(path.clone(), options).unwrap();
+            assert_eq!(db.get(&Key::from("a")).unwrap(), Some("safe".into()));
+            assert_eq!(db.get(&Key::from("b")).unwrap(), Some("pending".into()));
+            assert_eq!(db.get(&Key::from("c")).unwrap(), None);
+            db.put("c", "recovered").unwrap();
+            drop(db);
+            let db = Db::open(path.clone()).unwrap();
+            assert_eq!(db.get(&Key::from("a")).unwrap(), Some("safe".into()));
+            assert_eq!(db.get(&Key::from("c")).unwrap(), Some("recovered".into()));
+            drop(db);
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
 }

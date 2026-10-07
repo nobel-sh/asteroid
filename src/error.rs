@@ -39,6 +39,9 @@ pub enum Error {
     #[error("WAL I/O failed; close and reopen the database before writing again")]
     WalRequiresRecovery,
 
+    #[error("flush or compaction failed; close and reopen the database before writing again")]
+    DbRequiresRecovery,
+
     #[error("corrupt SSTable: {0}")]
     CorruptSstable(String),
 

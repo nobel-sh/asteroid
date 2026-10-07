@@ -5,7 +5,7 @@ use std::{fs::File, ops::RangeBounds, path::PathBuf, sync::Arc};
 
 use crate::{
     cache::BlockCache, manifest::Manifest, memtable::Memtable, table::SSTable, wal::Wal,
-    DbIterator, Key, Options, Result, Value, WriteBatch, WriteOptions,
+    DbIterator, Error, Key, Options, Result, Value, WriteBatch, WriteOptions,
 };
 
 #[derive(Debug)]
@@ -18,6 +18,7 @@ pub struct Db {
     _lockfile: File,
     options: Options,
     cache: Arc<BlockCache>,
+    requires_recovery: bool,
 }
 
 impl Db {
@@ -83,6 +84,9 @@ impl Db {
 
     /// Makes all preceding writes durable. Does not flush the memtable to an SSTable.
     pub fn sync_wal(&mut self) -> Result<()> {
+        if self.requires_recovery {
+            return Err(Error::DbRequiresRecovery);
+        }
         self.wal.sync()
     }
 
