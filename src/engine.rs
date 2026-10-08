@@ -18,6 +18,8 @@ use crate::{
     Error, Key, Options, Result, Value, WriteBatch, WriteOptions,
 };
 
+const WAL_BYTES_LIMIT: u64 = 4 * 1024 * 1024;
+
 impl Db {
     pub(super) fn open_inner(db_dir: PathBuf, options: Options) -> Result<Self> {
         options.validate()?;
@@ -188,7 +190,9 @@ impl Db {
         }
         self.manifest.last_sequence = final_sequence;
 
-        if self.memtable.estimated_bytes() >= self.options.memtable_bytes {
+        if self.memtable.estimated_bytes() >= self.options.memtable_bytes
+            || self.wal.size_bytes() >= WAL_BYTES_LIMIT
+        {
             // A failed publication may already have replaced the on-disk manifest.
             self.requires_recovery = true;
             self.flush_memtable()?;
@@ -330,6 +334,49 @@ fn discover_sstables(directory: &Path) -> Result<BTreeMap<u32, PathBuf>> {
 mod tests {
     use super::*;
     use crate::{manifest::FAIL_DIRECTORY_SYNC, test_util::test_dir};
+
+    #[test]
+    fn wal_budget_checkpoints_hot_keys_across_reopening() {
+        let path = test_dir("hot-key-wal-budget");
+        let options = Options {
+            memtable_bytes: usize::MAX,
+            ..Options::default()
+        };
+        let mut db = Db::open_with_options(path.clone(), options.clone()).unwrap();
+        for pass in 0..2 {
+            for _ in 0..550 {
+                db.put_with_options("hot", vec![pass; 4096], WriteOptions { sync: false })
+                    .unwrap();
+                assert!(db.wal.size_bytes() < WAL_BYTES_LIMIT);
+                assert_eq!(
+                    db.wal.size_bytes(),
+                    std::fs::metadata(path.join("wal.db")).unwrap().len()
+                );
+            }
+            assert!(db.memtable.estimated_bytes() < WAL_BYTES_LIMIT as usize);
+            assert_eq!(db.sstables.len(), pass as usize);
+            db.sync_wal().unwrap();
+            drop(db);
+            db = Db::open_with_options(path.clone(), options.clone()).unwrap();
+            assert_eq!(
+                db.get(&Key::from("hot")).unwrap(),
+                Some(vec![pass; 4096].into())
+            );
+        }
+        assert_eq!(db.last_sequence(), 1100);
+        db.delete("hot").unwrap();
+        db.put("after", "checkpoint").unwrap();
+        drop(db);
+        let db = Db::open(path.clone()).unwrap();
+        assert_eq!(db.get(&Key::from("hot")).unwrap(), None);
+        assert_eq!(
+            db.get(&Key::from("after")).unwrap(),
+            Some("checkpoint".into())
+        );
+        assert_eq!(db.last_sequence(), 1102);
+        drop(db);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[test]
     fn failed_manifest_publication_requires_reopening_before_writes() {

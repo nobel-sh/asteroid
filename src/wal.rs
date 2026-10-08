@@ -193,6 +193,7 @@ fn validate_sequence_range(first_sequence: u64, operation_count: u32) -> Result<
 #[derive(Debug)]
 pub(crate) struct Wal {
     file: File,
+    size_bytes: u64,
     requires_recovery: bool,
 }
 
@@ -203,10 +204,16 @@ impl Wal {
             .read(true)
             .append(true)
             .open(path)?;
+        let size_bytes = file.metadata()?.len();
         Ok(Self {
             file,
+            size_bytes,
             requires_recovery: false,
         })
+    }
+
+    pub(crate) fn size_bytes(&self) -> u64 {
+        self.size_bytes
     }
 
     pub(crate) fn append(
@@ -222,6 +229,7 @@ impl Wal {
         // An I/O failure may leave a partial frame; do not append behind it.
         self.requires_recovery = true;
         self.file.write_all(&bytes)?;
+        self.size_bytes += bytes.len() as u64;
         if sync {
             self.file.sync_all()?;
         }
@@ -252,6 +260,7 @@ impl Wal {
                 Some(record) => records.push(record),
                 None => {
                     self.file.set_len(record_start as u64)?;
+                    self.size_bytes = record_start as u64;
                     self.file.sync_all()?;
                     break;
                 }
@@ -263,6 +272,7 @@ impl Wal {
 
     pub(crate) fn reset(&mut self) -> Result<()> {
         self.file.set_len(0)?;
+        self.size_bytes = 0;
         self.file.sync_all()?;
         Ok(())
     }

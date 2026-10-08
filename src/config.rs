@@ -3,6 +3,7 @@ use crate::{Error, Result};
 #[derive(Clone, Debug)]
 pub struct Options {
     /// Flush after a complete write brings estimated memtable memory to this limit.
+    /// The WAL also triggers a flush at 4 MiB, even if live entries stay small.
     pub memtable_bytes: usize,
     /// Compact after a flush leaves at least this many SSTables
     pub compaction_trigger: usize,
