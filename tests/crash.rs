@@ -4,12 +4,16 @@ use std::{
     fs,
     path::PathBuf,
     process::{Command, Stdio},
+    sync::Mutex,
     thread,
     time::{Duration, Instant},
 };
 
 use asteroiddb::{Db, Key, Options, Value, WriteBatch, WriteOptions};
 use common::test_dir;
+
+// Keep process spawning separate from rapid database lock release/reacquisition.
+static CRASH_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 fn assert_contents(db: &Db, expected: &[(&str, Vec<u8>)]) {
     let expected: Vec<(Key, Value)> = expected
@@ -28,6 +32,7 @@ fn assert_contents(db: &Db, expected: &[(&str, Vec<u8>)]) {
 
 #[test]
 fn acknowledged_writes_survive_process_crash_matrix() {
+    let _guard = CRASH_TEST_LOCK.lock().unwrap();
     for storage in ["wal", "flush", "compact"] {
         for durability in ["sync", "async", "manual-sync"] {
             let path = test_dir(&format!("crash-{storage}-{durability}"));
@@ -135,6 +140,7 @@ fn crash_worker() {
 
 #[test]
 fn every_final_wal_batch_truncation_is_atomic() {
+    let _guard = CRASH_TEST_LOCK.lock().unwrap();
     let path = test_dir("crash-torn-wal");
     let wal = path.join("wal.db");
     let mut db = Db::open(path.clone()).unwrap();
