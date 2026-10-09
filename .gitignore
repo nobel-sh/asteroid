@@ -5,6 +5,8 @@
 !/src/
 !/src/**/
 !/src/**/*.rs
+!/bin/
+!/bin/*.rs
 !/tests/
 !/tests/**/
 !/tests/**/*.rs

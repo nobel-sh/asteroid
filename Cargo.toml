@@ -3,6 +3,11 @@ name = "asteroiddb"
 edition = "2021"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 crc32fast = "1.5.0"
 thiserror = "2.0.20"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[[bin]]
+name = "asteroiddb"
+path = "bin/main.rs"
