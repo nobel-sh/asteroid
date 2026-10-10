@@ -1,0 +1,11 @@
+[package]
+name = "asteroiddb-cli"
+edition = "2021"
+
+[dependencies]
+asteroiddb = { path = ".." }
+clap = { version = "4", features = ["derive"] }
+
+[[bin]]
+name = "asteroiddb"
+path = "src/main.rs"

@@ -6,8 +6,10 @@
 !/src/
 !/src/**/
 !/src/**/*.rs
-!/bin/
-!/bin/*.rs
+!/cli/
+!/cli/Cargo.toml
+!/cli/src/
+!/cli/src/*.rs
 !/tests/
 !/tests/**/
 !/tests/**/*.rs

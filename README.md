@@ -28,6 +28,11 @@ sorted, tab-separated key/value pairs with special bytes escaped.
 Build the standalone binary with `cargo build --release`; it is available at
 `target/release/asteroiddb`. Use `--help` for command details.
 
+The Cargo workspace keeps the database library at the root and the command-line
+application in `cli/`. Root commands include both packages by default. Use
+`cargo test --workspace` to test all members, or `cargo build -p asteroiddb-cli`
+to build just the CLI.
+
 ## Rust API
 
 ```rust
