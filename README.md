@@ -53,3 +53,19 @@ fn main() -> asteroiddb::Result<()> {
 cargo test
 cargo test --test crash # crash test
 ```
+
+## Basic benchmark
+
+With one thread, warm reads, 4 MiB block cache,
+Bloom filters at 10 bits/key, and no compression.
+
+```sh
+cargo bench --bench basic -- --keys 1000000 --key-bytes 16 --value-bytes 100 --sync false --cache true
+```
+
+| Workload | Operations/sec |
+| -------- | -------------- |
+| Sequential reads | 6,478,391 |
+| Random reads     | 160,615 |
+| Sequential writes| 115,600 |
+| Random writes    | 118,724 |

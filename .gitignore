@@ -10,6 +10,9 @@
 !/cli/Cargo.toml
 !/cli/src/
 !/cli/src/*.rs
+!/benches/
+!/benches/**/
+!/benches/**/*.rs
 !/tests/
 !/tests/**/
 !/tests/**/*.rs

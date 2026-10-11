@@ -6,8 +6,16 @@ resolver = "2"
 [package]
 name = "asteroiddb"
 edition = "2021"
+autobenches = false
 
 [dependencies]
 crc32fast = "1.5.0"
 thiserror = "2.0.20"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+[dev-dependencies]
+clap = { version = "4", features = ["derive"] }
+
+[[bench]]
+name = "basic"
+harness = false
