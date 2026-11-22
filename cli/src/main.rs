@@ -28,7 +28,13 @@ enum DbCommand {
     /// Delete a key and sync the write
     Delete { key: OsString },
     /// Print sorted keys and values separated by tabs, with special bytes escaped
-    Scan,
+    Scan {
+        /// Only print keys starting with these bytes
+        #[arg(long)]
+        prefix: Option<OsString>,
+    },
+    /// Create an independent checkpoint in a new directory
+    Checkpoint { destination: PathBuf },
 }
 
 fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
@@ -47,8 +53,13 @@ fn run(cli: Cli) -> Result<(), Box<dyn Error>> {
         DbCommand::Delete { key } => {
             db.delete(key.as_encoded_bytes())?;
         }
-        DbCommand::Scan => {
-            for entry in db.iter() {
+        DbCommand::Checkpoint { destination } => db.checkpoint(destination)?,
+        DbCommand::Scan { prefix } => {
+            let entries = match prefix {
+                Some(prefix) => db.scan_prefix(prefix.as_encoded_bytes()),
+                None => db.iter(),
+            };
+            for entry in entries {
                 let (key, value) = entry?;
                 writeln!(
                     output,

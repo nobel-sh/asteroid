@@ -1,7 +1,14 @@
 #[path = "engine.rs"]
 mod engine;
 
-use std::{fs::File, ops::RangeBounds, path::PathBuf, sync::Arc};
+use std::{
+    fs::{self, File},
+    io,
+    ops::RangeBounds,
+    os::unix::fs::PermissionsExt,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use crate::{
     cache::BlockCache, manifest::Manifest, memtable::Memtable, table::SSTable, wal::Wal,
@@ -43,6 +50,77 @@ impl Db {
     /// The iterator borrows the database, preventing writes until it is dropped.
     pub fn range(&self, range: impl RangeBounds<Key>) -> DbIterator<'_> {
         DbIterator::new(&self.memtable, &self.sstables, range)
+    }
+
+    /// Scans keys beginning with the given bytes, in ascending key order.
+    pub fn scan_prefix(&self, prefix: impl AsRef<[u8]>) -> DbIterator<'_> {
+        let prefix = prefix.as_ref();
+        let start = Key::from(prefix);
+        // Carry past trailing 0xff bytes to find the exclusive upper bound.
+        if let Some(i) = prefix.iter().rposition(|&byte| byte != u8::MAX) {
+            let mut end = prefix[..=i].to_vec();
+            end[i] += 1;
+            self.range(start..Key::from(end))
+        } else {
+            self.range(start..)
+        }
+    }
+
+    /// Copies the current database, including pending WAL writes, to a new directory.
+    /// Its parent must already exist outside the source database. Writes pause during the copy.
+    pub fn checkpoint(&mut self, destination: impl AsRef<Path>) -> Result<()> {
+        let destination = destination.as_ref();
+        let name = destination.file_name().ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "checkpoint needs a new directory name",
+            )
+        })?;
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."))
+            .canonicalize()?;
+        if parent.starts_with(self.db_dir.canonicalize()?) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "checkpoint must be outside the database directory",
+            )
+            .into());
+        }
+        let destination = parent.join(name);
+        match fs::symlink_metadata(&destination) {
+            Ok(_) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::AlreadyExists,
+                    "checkpoint destination exists",
+                )
+                .into())
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        self.sync_wal()?;
+        let staging = tempfile::Builder::new()
+            .prefix(".asteroiddb-checkpoint-")
+            .permissions(fs::Permissions::from_mode(0o700))
+            .tempdir_in(&parent)?;
+        let copy = |source: &Path, target: PathBuf| -> io::Result<()> {
+            fs::copy(source, &target)?;
+            File::open(target)?.sync_all()
+        };
+        for table in &self.sstables {
+            copy(&table.path(&self.db_dir), table.path(staging.path()))?;
+        }
+        // The on-disk manifest records the flushed sequence. Newer writes live in the WAL.
+        for name in ["wal.db", "MANIFEST"] {
+            copy(&self.db_dir.join(name), staging.path().join(name))?;
+        }
+        File::open(staging.path())?.sync_all()?;
+        fs::rename(staging.path(), destination)?;
+        let _ = staging.keep();
+        File::open(parent)?.sync_all()?;
+        Ok(())
     }
 
     pub fn put(&mut self, key: impl Into<Key>, value: impl Into<Value>) -> Result<()> {
